@@ -4,8 +4,6 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signOut, User } from 'firebase/auth';
-import { collection, doc, onSnapshot, query, where } from 'firebase/firestore';
 import {
   AlertCircle,
   ArrowUpRight,
@@ -30,11 +28,14 @@ import { MoneyLinkLogo } from './components/MoneyLinkLogo';
 import { ProfilePage } from './components/ProfilePage';
 import { WithdrawPage } from './components/WithdrawPage';
 import { BOOST_APPS, formatBoostMultiplierLabel } from './data/boostApps';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import {
+  bootstrapAppSession,
   commitVerifiedUptimeInterval,
+  refreshWalletFromServer,
   registerOrActivateDevice,
   setDeviceOffline,
+  signOutAppSession,
+  subscribeWalletState,
 } from './services/ledgerService';
 import {
   AppPage,
@@ -84,14 +85,11 @@ function loadSavedBoostAppIds(uid: string): string[] {
 }
 
 function MoneyLinkWorkspace() {
-  const [authReady, setAuthReady] = useState(false);
   const [initialBootDone, setInitialBootDone] = useState(false);
   const [bootSplashMinDone, setBootSplashMinDone] = useState(false);
   const [postSignUpLoading, setPostSignUpLoading] = useState(false);
 
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [account, setAccount] = useState<UserAccount | null>(null);
-  const [accountConfirmedOnServer, setAccountConfirmedOnServer] = useState(false);
   const [vault, setVault] = useState<UserPrivateVault | null>(null);
   const [devices, setDevices] = useState<ConnectedDevice[]>([]);
   const [earnings, setEarnings] = useState<EarningEntry[]>([]);
@@ -172,35 +170,57 @@ function MoneyLinkWorkspace() {
     };
   }, []);
 
-  // Keep existing signed-in users logged in automatically across refreshes & updates
+  // Subscribe to Money Link's built-in app authentication & wallet state
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      setFirebaseUser(user);
-      setAuthReady(true);
-      if (user) {
-        setConnectedAppIds(loadSavedBoostAppIds(user.uid));
-      } else {
-        setAccount(null);
-        setAccountConfirmedOnServer(false);
-        setVault(null);
-        setDevices([]);
-        setEarnings([]);
-        setWithdrawals([]);
-        setConnectedAppIds([]);
-        setInitialBootDone(true);
-        setLocalConnected(false);
-      }
+    const unsub = subscribeWalletState((snap) => {
+      setAccount(snap.account);
+      setVault(snap.vault);
+      setDevices(snap.devices);
+      setEarnings(snap.earnings);
+      setWithdrawals(snap.withdrawals);
     });
-    return () => unsub();
+
+    void bootstrapAppSession().finally(() => {
+      setInitialBootDone(true);
+    });
+
+    return () => {
+      unsub();
+    };
   }, []);
+
+  const activeUid = account?.uid || null;
+
+  useEffect(() => {
+    if (activeUid) {
+      setConnectedAppIds(loadSavedBoostAppIds(activeUid));
+    } else {
+      setConnectedAppIds([]);
+      setLocalConnected(false);
+    }
+  }, [activeUid]);
+
+  // Keep Dashboard synced if user has QR-paired phones streaming simultaneously
+  const hasPairedPhones = useMemo(
+    () => devices.some((d) => d.connectionType === 'qr_paired_phone' && d.status !== 'revoked'),
+    [devices]
+  );
+
+  useEffect(() => {
+    if (!activeUid || !hasPairedPhones) return;
+    const poll = window.setInterval(() => {
+      void refreshWalletFromServer();
+    }, 5000);
+    return () => window.clearInterval(poll);
+  }, [activeUid, hasPairedPhones]);
 
   const persistBoostApps = useCallback(
     (nextIds: string[]) => {
       setConnectedAppIds(nextIds);
-      if (firebaseUser) {
+      if (activeUid) {
         try {
           localStorage.setItem(
-            `moneylink_boost_apps_${firebaseUser.uid}`,
+            `moneylink_boost_apps_${activeUid}`,
             JSON.stringify(nextIds)
           );
         } catch {
@@ -208,7 +228,7 @@ function MoneyLinkWorkspace() {
         }
       }
     },
-    [firebaseUser]
+    [activeUid]
   );
 
   const handleToggleBoostApp = useCallback(
@@ -216,9 +236,9 @@ function MoneyLinkWorkspace() {
       setConnectedAppIds((prev) => {
         const exists = prev.includes(appId);
         const next = exists ? prev.filter((id) => id !== appId) : [...prev, appId];
-        if (firebaseUser) {
+        if (activeUid) {
           try {
-            localStorage.setItem(`moneylink_boost_apps_${firebaseUser.uid}`, JSON.stringify(next));
+            localStorage.setItem(`moneylink_boost_apps_${activeUid}`, JSON.stringify(next));
           } catch {
             // Ignore storage errors
           }
@@ -226,17 +246,17 @@ function MoneyLinkWorkspace() {
         return next;
       });
     },
-    [firebaseUser]
+    [activeUid]
   );
 
   const handleConnectMultipleApps = useCallback(
     (appIds: string[]) => {
       setConnectedAppIds((prev) => {
         const merged = Array.from(new Set([...prev, ...appIds]));
-        if (firebaseUser) {
+        if (activeUid) {
           try {
             localStorage.setItem(
-              `moneylink_boost_apps_${firebaseUser.uid}`,
+              `moneylink_boost_apps_${activeUid}`,
               JSON.stringify(merged)
             );
           } catch {
@@ -246,124 +266,18 @@ function MoneyLinkWorkspace() {
         return merged;
       });
     },
-    [firebaseUser]
+    [activeUid]
   );
 
   const handleDisconnectAllApps = useCallback(() => {
     persistBoostApps([]);
   }, [persistBoostApps]);
 
-  // Attach Firestore account listener when auth is ready and user is authenticated.
-  useEffect(() => {
-    if (!authReady || !firebaseUser) return;
-
-    const uid = firebaseUser.uid;
-    const userPath = `users/${uid}`;
-
-    const unsubAccount = onSnapshot(
-      doc(db, 'users', uid),
-      { includeMetadataChanges: true },
-      (snap) => {
-        if (snap.exists()) {
-          const data = snap.data() as UserAccount;
-          setAccount(data);
-          if (!snap.metadata.hasPendingWrites) {
-            setAccountConfirmedOnServer(true);
-          }
-        } else {
-          setAccount(null);
-          setAccountConfirmedOnServer(false);
-        }
-        setInitialBootDone(true);
-      },
-      (err) => {
-        setInitialBootDone(true);
-        handleFirestoreError(err, OperationType.GET, userPath);
-      }
-    );
-
-    return () => {
-      unsubAccount();
-    };
-  }, [authReady, firebaseUser]);
-
-  // Attach subcollection listeners once parent /users/{uid} is confirmed on server
-  useEffect(() => {
-    if (!authReady || !firebaseUser || !account?.identityVerified || !accountConfirmedOnServer) {
-      return;
-    }
-
-    const uid = firebaseUser.uid;
-
-    const unsubVault = onSnapshot(
-      doc(db, 'users', uid, 'private', 'vault'),
-      (snap) => {
-        if (snap.exists()) {
-          setVault(snap.data() as UserPrivateVault);
-        }
-      },
-      (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/private/vault`)
-    );
-
-    const devicesQuery = query(
-      collection(db, 'users', uid, 'devices'),
-      where('uid', '==', uid)
-    );
-    const unsubDevices = onSnapshot(
-      devicesQuery,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as ConnectedDevice);
-        list.sort((a, b) => (b.updatedAt?.toMillis() || 0) - (a.updatedAt?.toMillis() || 0));
-        setDevices(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, `users/${uid}/devices`)
-    );
-
-    const earningsQuery = query(
-      collection(db, 'users', uid, 'earnings'),
-      where('uid', '==', uid)
-    );
-    const unsubEarnings = onSnapshot(
-      earningsQuery,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as EarningEntry);
-        list.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
-        setEarnings(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, `users/${uid}/earnings`)
-    );
-
-    const withdrawalsQuery = query(
-      collection(db, 'users', uid, 'withdrawals'),
-      where('uid', '==', uid)
-    );
-    const unsubWithdrawals = onSnapshot(
-      withdrawalsQuery,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as WithdrawalRequest);
-        list.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
-        setWithdrawals(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, `users/${uid}/withdrawals`)
-    );
-
-    return () => {
-      unsubVault();
-      unsubDevices();
-      unsubEarnings();
-      unsubWithdrawals();
-    };
-  }, [authReady, firebaseUser, account?.identityVerified, accountConfirmedOnServer]);
-
   const handleAuthenticated = useCallback(
-    (authedUser?: User, verifiedAccount?: UserAccount, isNewSignUp?: boolean) => {
-      if (authedUser) {
-        setFirebaseUser(authedUser);
-        setConnectedAppIds(loadSavedBoostAppIds(authedUser.uid));
-      }
+    (verifiedAccount?: UserAccount, isNewSignUp?: boolean) => {
       if (verifiedAccount) {
         setAccount(verifiedAccount);
-        setAccountConfirmedOnServer(true);
+        setConnectedAppIds(loadSavedBoostAppIds(verifiedAccount.uid));
       }
       setInitialBootDone(true);
 
@@ -390,19 +304,19 @@ function MoneyLinkWorkspace() {
   }, []);
 
   const handleStartLocalNode = useCallback(async () => {
-    if (!firebaseUser || !account) return;
+    if (!activeUid || !account) return;
     setWorkspaceError('');
     setLocalConnecting(true);
     try {
-      const localDevId = getOrCreateLocalDeviceId(firebaseUser.uid, revokedDeviceIds);
+      const localDevId = getOrCreateLocalDeviceId(activeUid, revokedDeviceIds);
       const dev = await registerOrActivateDevice(
-        firebaseUser.uid,
+        activeUid,
         localDevId,
         'direct_device'
       );
       if (dev.deviceId !== localDevId) {
         try {
-          localStorage.setItem(`moneylink_node_id_${firebaseUser.uid}`, dev.deviceId);
+          localStorage.setItem(`moneylink_node_id_${activeUid}`, dev.deviceId);
         } catch {
           // Ignore storage error
         }
@@ -432,16 +346,16 @@ function MoneyLinkWorkspace() {
     } finally {
       setLocalConnecting(false);
     }
-  }, [firebaseUser, account, revokedDeviceIds]);
+  }, [activeUid, account, revokedDeviceIds]);
 
   const handleStopLocalNode = useCallback(async () => {
-    if (!firebaseUser) return;
+    if (!activeUid) return;
     setWorkspaceError('');
     setLocalConnected(false);
     await releaseWakeLock();
 
     try {
-      const localDevId = getOrCreateLocalDeviceId(firebaseUser.uid, revokedDeviceIds);
+      const localDevId = getOrCreateLocalDeviceId(activeUid, revokedDeviceIds);
       const leftoverTicks = pendingTicksRef.current;
       const leftoverSecs = pendingSecRef.current;
       const leftoverMicros = pendingMicrosRef.current;
@@ -457,7 +371,7 @@ function MoneyLinkWorkspace() {
         try {
           const safeSecs = Math.max(leftoverTicks, leftoverSecs, 1);
           const res = await commitVerifiedUptimeInterval(
-            firebaseUser.uid,
+            activeUid,
             localDevId,
             safeSecs,
             leftoverMicros
@@ -467,18 +381,18 @@ function MoneyLinkWorkspace() {
           committingRef.current = false;
         }
       }
-      await setDeviceOffline(firebaseUser.uid, localDevId);
+      await setDeviceOffline(activeUid, localDevId);
     } catch (err) {
       setWorkspaceError(
         err instanceof Error ? err.message : 'Error while pausing phone node.'
       );
     }
-  }, [firebaseUser, releaseWakeLock, revokedDeviceIds]);
+  }, [activeUid, releaseWakeLock, revokedDeviceIds]);
 
   // Real-time fast +$0.10 * boostMultiplier every 1.8s stream loop
   useEffect(() => {
-    if (!localConnected || !firebaseUser) return;
-    const uid = firebaseUser.uid;
+    if (!localConnected || !activeUid) return;
+    const uid = activeUid;
     const localDevId = getOrCreateLocalDeviceId(uid, revokedDeviceIds);
 
     const secTimer = window.setInterval(() => {
@@ -536,14 +450,14 @@ function MoneyLinkWorkspace() {
       window.clearInterval(secTimer);
       window.clearInterval(fastTickTimer);
     };
-  }, [localConnected, firebaseUser, revokedDeviceIds]);
+  }, [localConnected, activeUid, revokedDeviceIds]);
 
   const handleSignOut = async (): Promise<void> => {
     try {
       if (localConnected) {
         await handleStopLocalNode();
       }
-      await signOut(auth);
+      await signOutAppSession();
     } catch (err) {
       setWorkspaceError(err instanceof Error ? err.message : 'Unable to sign out cleanly.');
     }
@@ -579,7 +493,6 @@ function MoneyLinkWorkspace() {
       <MobileNodeView
         pairCode={initialPairParams.pairCode}
         deviceId={initialPairParams.deviceId}
-        firebaseUser={firebaseUser}
         onExitToDashboard={() => {
           setMobilePairMode(false);
           window.history.replaceState({}, '', window.location.pathname);
@@ -589,10 +502,9 @@ function MoneyLinkWorkspace() {
   }
 
   // Only show AuthPortal if user is not signed in or has not completed USA ID verification yet
-  if (!firebaseUser || !account || !account.identityVerified) {
+  if (!account || !account.identityVerified) {
     return (
       <AuthPortal
-        firebaseUser={firebaseUser}
         existingAccount={account?.identityVerified ? account : null}
         onAuthenticated={handleAuthenticated}
       />

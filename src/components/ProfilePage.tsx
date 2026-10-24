@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { CheckCircle2, LogOut, Save, ShieldCheck, Smartphone } from 'lucide-react';
-import { db, handleFirestoreError, OperationType } from '../firebase';
-import { revokeConnectedDevice } from '../services/ledgerService';
+import {
+  revokeConnectedDevice,
+  updateProfileName,
+  updateProfileSecurity,
+} from '../services/ledgerService';
 import { ConnectedDevice, UserAccount, UserPrivateVault } from '../types';
 import {
   formatDurationSeconds,
@@ -70,13 +72,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
     setSavingName(true);
     try {
-      await updateDoc(doc(db, 'users', account.uid), {
-        displayName: trimmed,
-        updatedAt: serverTimestamp(),
-      });
+      await updateProfileName(account.uid, trimmed);
       setFeedback('Legal display name saved.');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${account.uid}`);
+      setErrorMsg(err instanceof Error ? err.message : 'Unable to save legal display name.');
     } finally {
       setSavingName(false);
     }
@@ -90,7 +89,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
     const check = validateContactInput(contactInput);
     if (!check.valid) {
-      setErrorMsg(check.error || 'Enter a valid Gmail address or phone number.');
+      setErrorMsg(check.error || 'Enter a valid email address or mobile phone number.');
       return;
     }
 
@@ -105,17 +104,12 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
     setSavingSecurity(true);
     try {
-      await updateDoc(doc(db, 'users', account.uid, 'private', 'vault'), {
-        contactType: check.type,
-        contactValue: check.normalized,
-        passwordHash,
-        updatedAt: serverTimestamp(),
-      });
+      await updateProfileSecurity(account.uid, check.type, check.normalized, passwordHash);
       setNewPassword('');
       setContactInput(check.normalized);
       setFeedback('Contact details and wallet password updated.');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${account.uid}/private/vault`);
+      setErrorMsg(err instanceof Error ? err.message : 'Unable to update contact or password.');
     } finally {
       setSavingSecurity(false);
     }
@@ -247,7 +241,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             <div className="border-b border-slate-100 pb-3.5">
               <h2 className="text-base font-extrabold text-slate-900">Contact &amp; Password</h2>
               <p className="text-xs text-slate-500 truncate">
-                Google Security Bind: {vault?.authEmail || 'Verified'}
+                Registered Login: {vault?.contactValue || vault?.authEmail || 'Verified'}
               </p>
             </div>
 
@@ -256,7 +250,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 htmlFor="profile-contact"
                 className="block text-xs font-bold text-slate-700 mb-1.5"
               >
-                Gmail or Mobile Phone Number
+                Email Address or Mobile Phone Number
               </label>
               <input
                 id="profile-contact"

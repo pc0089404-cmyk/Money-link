@@ -1,12 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { signInWithPopup, User } from 'firebase/auth';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { CheckCircle2, Lock, Pause, Play, Smartphone, Wifi, WifiOff, Zap } from 'lucide-react';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
+import { CheckCircle2, Pause, Play, Smartphone, Wifi, WifiOff, Zap } from 'lucide-react';
 import {
-  commitVerifiedUptimeInterval,
-  registerOrActivateDevice,
-  setDeviceOffline,
+  activatePairedPhone,
+  commitPairedPhoneInterval,
+  fetchPairSlotInfo,
+  setPairedPhoneOffline,
 } from '../services/ledgerService';
 import {
   ConnectedDevice,
@@ -22,18 +20,17 @@ import { MoneyLinkLogo } from './MoneyLinkLogo';
 interface MobileNodeViewProps {
   pairCode: string;
   deviceId: string;
-  firebaseUser: User | null;
   onExitToDashboard: () => void;
 }
 
 export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
   pairCode,
   deviceId,
-  firebaseUser,
   onExitToDashboard,
 }) => {
   const [account, setAccount] = useState<UserAccount | null>(null);
   const [device, setDevice] = useState<ConnectedDevice | null>(null);
+  const [loadingSlot, setLoadingSlot] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [browserOnline, setBrowserOnline] = useState<boolean>(navigator.onLine);
   const [pendingSeconds, setPendingSeconds] = useState(0);
@@ -58,54 +55,43 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
     };
   }, []);
 
-  const [accountConfirmed, setAccountConfirmed] = useState(false);
-
   useEffect(() => {
-    if (!firebaseUser) {
-      setAccount(null);
-      setAccountConfirmed(false);
-      return;
-    }
-    const unsubUser = onSnapshot(
-      doc(db, 'users', firebaseUser.uid),
-      { includeMetadataChanges: true },
-      (snap) => {
-        if (snap.exists()) {
-          setAccount(snap.data() as UserAccount);
-          setAccountConfirmed(!snap.metadata.hasPendingWrites);
-        } else {
-          setAccount(null);
-          setAccountConfirmed(false);
+    let cancelled = false;
+    const loadSlot = async (isInitial: boolean) => {
+      try {
+        const info = await fetchPairSlotInfo(pairCode, deviceId);
+        if (!cancelled) {
+          setAccount(info.account);
+          setDevice(info.device);
+          setErrorMsg('');
         }
-      },
-      (err) => handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`)
-    );
+      } catch (err) {
+        if (!cancelled && isInitial) {
+          setErrorMsg(
+            err instanceof Error
+              ? err.message
+              : 'QR pairing code not found. Generate a fresh QR link on your Dashboard.'
+          );
+        }
+      } finally {
+        if (!cancelled && isInitial) {
+          setLoadingSlot(false);
+        }
+      }
+    };
+
+    void loadSlot(true);
+    const poll = window.setInterval(() => {
+      if (!isActive) {
+        void loadSlot(false);
+      }
+    }, 4500);
 
     return () => {
-      unsubUser();
+      cancelled = true;
+      window.clearInterval(poll);
     };
-  }, [firebaseUser]);
-
-  useEffect(() => {
-    if (!firebaseUser || !account?.identityVerified || !accountConfirmed) return;
-
-    const unsubDev = onSnapshot(
-      doc(db, 'users', firebaseUser.uid, 'devices', deviceId),
-      (snap) => {
-        if (snap.exists()) setDevice(snap.data() as ConnectedDevice);
-      },
-      (err) =>
-        handleFirestoreError(
-          err,
-          OperationType.GET,
-          `users/${firebaseUser.uid}/devices/${deviceId}`
-        )
-    );
-
-    return () => {
-      unsubDev();
-    };
-  }, [firebaseUser, deviceId, account?.identityVerified, accountConfirmed]);
+  }, [pairCode, deviceId, isActive]);
 
   const acquireWakeLock = async (): Promise<void> => {
     if ('wakeLock' in navigator && navigator.wakeLock) {
@@ -131,16 +117,12 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
   };
 
   const startMobileConnection = async (): Promise<void> => {
-    if (!firebaseUser) return;
     setErrorMsg('');
     setConnecting(true);
     try {
-      await registerOrActivateDevice(
-        firebaseUser.uid,
-        deviceId,
-        'qr_paired_phone',
-        pairCode
-      );
+      const activated = await activatePairedPhone(pairCode, deviceId);
+      setAccount(activated.account);
+      setDevice(activated.device);
       await acquireWakeLock();
       pendingSecRef.current = 0;
       pendingTicksRef.current = 0;
@@ -155,7 +137,6 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
   };
 
   const pauseMobileConnection = async (): Promise<void> => {
-    if (!firebaseUser) return;
     setIsActive(false);
     await releaseWakeLock();
     const leftoverTicks = pendingTicksRef.current;
@@ -168,21 +149,23 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
       committingRef.current = true;
       try {
         const safeSecs = Math.max(leftoverTicks, leftoverSecs, 1);
-        await commitVerifiedUptimeInterval(
-          firebaseUser.uid,
+        const res = await commitPairedPhoneInterval(
+          pairCode,
           deviceId,
           safeSecs,
           leftoverTicks * MICROS_PER_TICK
         );
+        if (res.account) setAccount(res.account);
+        if (res.device) setDevice(res.device);
       } finally {
         committingRef.current = false;
       }
     }
-    await setDeviceOffline(firebaseUser.uid, deviceId);
+    await setPairedPhoneOffline(pairCode, deviceId);
   };
 
   useEffect(() => {
-    if (!isActive || !firebaseUser) return;
+    if (!isActive) return;
 
     const secTimer = window.setInterval(() => {
       if (!navigator.onLine) return;
@@ -207,13 +190,15 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
         setPendingSeconds(0);
         committingRef.current = true;
 
-        void commitVerifiedUptimeInterval(
-          firebaseUser.uid,
+        void commitPairedPhoneInterval(
+          pairCode,
           deviceId,
           secsToCommit,
           ticksToCommit * MICROS_PER_TICK
         )
           .then((res) => {
+            if (res.account) setAccount(res.account);
+            if (res.device) setDevice(res.device);
             if (!res.committed) {
               setIsActive(false);
             }
@@ -228,23 +213,7 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
       window.clearInterval(secTimer);
       window.clearInterval(fastTickTimer);
     };
-  }, [isActive, firebaseUser, deviceId]);
-
-  const handleAuthOnPhone = async (): Promise<void> => {
-    setErrorMsg('');
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Sign-in failed.';
-      if (msg.includes('popup-closed-by-user') || msg.includes('cancelled-popup-request')) {
-        setErrorMsg('Verification window closed. Tap "Verify & Pair Phone" again to connect.');
-      } else if (msg.includes('popup-blocked')) {
-        setErrorMsg('Popup blocked by browser. Allow popups and tap "Verify & Pair Phone" again.');
-      } else {
-        setErrorMsg(msg);
-      }
-    }
-  };
+  }, [isActive, pairCode, deviceId]);
 
   const pendingMicros = pendingTicks * MICROS_PER_TICK;
   const liveBalanceMicros = (account?.availableBalanceMicros || 0) + pendingMicros;
@@ -285,43 +254,34 @@ export const MobileNodeView: React.FC<MobileNodeViewProps> = ({
             </span>
           </div>
 
-          {!firebaseUser ? (
-            <div className="space-y-4 pt-1">
-              <h1 className="text-xl font-extrabold text-white">
-                Link this smartphone to your Money Link wallet
-              </h1>
-              <p className="text-xs text-sky-100/90 leading-relaxed">
-                Confirm your Google account bound to your USA ID so this phone streams +$0.10 every
-                1.8 seconds ($10.00 in 3 minutes).
+          {loadingSlot ? (
+            <div className="space-y-2 py-4">
+              <p className="text-base font-extrabold text-white">Connecting Smartphone Link...</p>
+              <p className="text-xs text-sky-100/90">
+                Verifying pairing code {pairCode} with your Money Link wallet...
               </p>
-              {errorMsg && <p className="text-xs text-amber-200 font-semibold">{errorMsg}</p>}
-              <button
-                type="button"
-                onClick={() => void handleAuthOnPhone()}
-                className="w-full min-h-[50px] inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-extrabold bg-white text-slate-950 rounded-2xl hover:bg-sky-50 active:scale-[0.98] transition-all"
-              >
-                <Lock className="w-4 h-4" />
-                Verify &amp; Pair Phone
-              </button>
             </div>
           ) : !account ? (
             <div className="space-y-3 pt-1">
-              <h1 className="text-lg font-extrabold text-white">Complete USA ID Sign-Up First</h1>
+              <h1 className="text-lg font-extrabold text-white">QR Pairing Link Ready</h1>
               <p className="text-xs text-sky-100/90">
-                Finish creating your wallet with a verified USA ID code before pairing a phone.
+                {errorMsg ||
+                  'Generate a fresh QR code from your Money Link Dashboard or open your wallet directly.'}
               </p>
               <button
                 type="button"
                 onClick={onExitToDashboard}
                 className="w-full min-h-[48px] px-4 py-3 text-xs font-extrabold bg-white text-slate-950 rounded-2xl"
               >
-                Go to USA ID Sign Up
+                Open Money Link Wallet
               </button>
             </div>
           ) : (
             <div className="space-y-5">
               <div>
-                <p className="text-xs text-sky-200 font-semibold">Live Wallet Balance</p>
+                <p className="text-xs text-sky-200 font-semibold">
+                  {account.displayName} · Live Wallet Balance
+                </p>
                 <p className="text-4xl font-extrabold font-mono tabular-nums text-white mt-1">
                   {formatUsdMicros(liveBalanceMicros, 2)}
                 </p>

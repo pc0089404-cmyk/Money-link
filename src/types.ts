@@ -1,4 +1,7 @@
-import { Timestamp } from 'firebase/firestore';
+export interface AppTimestamp {
+  toDate(): Date;
+  toMillis(): number;
+}
 
 export const MICROS_PER_DOLLAR = 1_000_000;
 export const MICROS_PER_TICK = 100_000; // Base +$0.10 exact per fast tick (1.0x)
@@ -6,11 +9,11 @@ export const TICK_INTERVAL_MS = 1800; // Every 1.8s adds +$0.10 * boostMultiplie
 export const TICKS_PER_COMMIT = 5; // Syncs every 5 ticks (9 seconds)
 export const HEARTBEAT_COMMIT_SECONDS = 9; // 9 seconds per server ledger commit
 export const MICROS_PER_SECOND = 55_556; // Base ~$0.0556/sec ($10.00 in 3 minutes)
-export const MAX_BOOST_MULTIPLIER = 20; // Safe ceiling within Firestore security rules
+export const MAX_BOOST_MULTIPLIER = 20; // Safe ceiling
 export const MIN_WITHDRAWAL_MICROS = 10_000_000; // $10.00 minimum real withdrawal
 
 export type UsaIdType = 'drivers_license' | 'state_id' | 'passport_card';
-export type ContactType = 'gmail' | 'phone';
+export type ContactType = 'gmail' | 'email' | 'phone';
 export type VerificationMethod = 'camera_liveness' | 'document_attestation';
 export type DeviceConnectionType = 'qr_paired_phone' | 'direct_device';
 export type DeviceStatus = 'online' | 'offline' | 'revoked';
@@ -38,8 +41,8 @@ export interface UserAccount {
   lifetimeEarnedMicros: number;
   totalWithdrawnMicros: number;
   totalOnlineSeconds: number;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: AppTimestamp | null;
+  updatedAt: AppTimestamp | null;
 }
 
 export interface UserPrivateVault {
@@ -54,8 +57,8 @@ export interface UserPrivateVault {
   idExpiryDate: string;
   verificationMethod: VerificationMethod;
   verificationDigest: string;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: AppTimestamp | null;
+  updatedAt: AppTimestamp | null;
 }
 
 export interface ConnectedDevice {
@@ -71,9 +74,9 @@ export interface ConnectedDevice {
   latencyMs: number;
   sessionSeconds: number;
   sessionEarnedMicros: number;
-  lastHeartbeatAt: Timestamp | null;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  lastHeartbeatAt: AppTimestamp | null;
+  createdAt: AppTimestamp | null;
+  updatedAt: AppTimestamp | null;
 }
 
 export interface EarningEntry {
@@ -87,7 +90,7 @@ export interface EarningEntry {
   dayKey: string;
   monthKey: string;
   yearKey: string;
-  createdAt: Timestamp | null;
+  createdAt: AppTimestamp | null;
 }
 
 export interface WithdrawalRequest {
@@ -98,6 +101,6 @@ export interface WithdrawalRequest {
   destinationMasked: string;
   rpcCodeHash: string;
   status: WithdrawalStatus;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: AppTimestamp | null;
+  updatedAt: AppTimestamp | null;
 }

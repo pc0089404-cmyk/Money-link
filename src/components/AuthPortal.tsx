@@ -1,6 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { signInWithPopup, User } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
 import {
   AlertCircle,
   Building2,
@@ -17,8 +15,8 @@ import {
   Wifi,
 } from 'lucide-react';
 import showcaseHeroImg from '../assets/images/mobile_network_node_showcase_1792783810044.jpg';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
-import { UsaIdType, UserAccount, UserPrivateVault, VerificationMethod } from '../types';
+import { signInAppAccount, signUpAppAccount } from '../services/ledgerService';
+import { UsaIdType, UserAccount, VerificationMethod } from '../types';
 import {
   sha256Hex,
   US_STATES,
@@ -29,42 +27,15 @@ import { MoneyLinkLoader } from './MoneyLinkLoader';
 import { MoneyLinkLogo } from './MoneyLinkLogo';
 
 interface AuthPortalProps {
-  firebaseUser: User | null;
   existingAccount: UserAccount | null;
-  onAuthenticated: (user?: User, verifiedAccount?: UserAccount, isNewSignUp?: boolean) => void;
+  onAuthenticated: (verifiedAccount?: UserAccount, isNewSignUp?: boolean) => void;
 }
 
 function normalizeNameForMatch(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function formatAuthPopupError(err: unknown, actionLabel: string): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  if (
-    raw.includes('popup-closed-by-user') ||
-    raw.includes('cancelled-popup-request')
-  ) {
-    return `Google security verification window was closed before finishing. Tap "${actionLabel}" again and select your Google account to complete verification.`;
-  }
-  if (raw.includes('popup-blocked')) {
-    return `Your browser blocked the verification window. Allow popups for this site, then tap "${actionLabel}" again.`;
-  }
-  if (raw.includes('network-request-failed')) {
-    return 'Network connection interrupted. Check your internet connection and tap again.';
-  }
-  try {
-    const parsed = JSON.parse(raw) as { error?: string };
-    if (parsed?.error) {
-      return `Verification database error: ${parsed.error}`;
-    }
-  } catch {
-    // Plain error message
-  }
-  return raw || 'Verification could not be completed. Please try again.';
-}
-
 export const AuthPortal: React.FC<AuthPortalProps> = ({
-  firebaseUser,
   existingAccount,
   onAuthenticated,
 }) => {
@@ -268,7 +239,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     if (!contactCheck.valid) {
       setInvalidField('contactInput');
       setErrorMsg(
-        contactCheck.error || 'Enter a valid @gmail.com address or mobile phone number.'
+        contactCheck.error || 'Enter a valid email address or mobile phone number.'
       );
       contactRef.current?.focus();
       return;
@@ -371,40 +342,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setSubmitting(true);
     try {
-      let activeUser = firebaseUser;
-      if (!activeUser) {
-        setStatusMsg('Opening Google verification to bind your verified USA ID...');
-        const cred = await signInWithPopup(auth, googleProvider);
-        activeUser = cred.user;
-      }
-
-      if (!activeUser.emailVerified) {
-        setErrorMsg('Your Google account must have a verified email address.');
-        return;
-      }
-
       setStatusMsg('Encrypting USA ID hash & creating your $0.0000 Money Link wallet...');
-
-      const userPath = `users/${activeUser.uid}`;
-      const userRef = doc(db, 'users', activeUser.uid);
-      const vaultRef = doc(db, 'users', activeUser.uid, 'private', 'vault');
-
-      let existingSnap;
-      try {
-        existingSnap = await getDoc(userRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, userPath);
-      }
-
-      if (existingSnap?.exists()) {
-        const existingData = existingSnap.data() as UserAccount;
-        onAuthenticated(activeUser, existingData);
-        return;
-      }
 
       const cleanDisplayName = fullName.trim().slice(0, 80);
       const cleanContact = contactCheck.normalized.slice(0, 120);
-      const cleanAuthEmail = (activeUser.email || cleanContact).slice(0, 120);
 
       const [passwordHash, usaIdHash, ssnLast4Hash, attHash] = await Promise.all([
         sha256Hex(password),
@@ -418,63 +359,27 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           ? cameraDigest
           : `ATTEST_${attHash.slice(0, 24)}`;
 
-      const batch = writeBatch(db);
-      batch.set(userRef, {
-        uid: activeUser.uid,
+      const snapshot = await signUpAppAccount({
         displayName: cleanDisplayName,
-        identityVerified: true,
+        contactType: contactCheck.type,
+        contactValue: cleanContact,
+        passwordHash,
         issuingState,
         idType,
         usaIdMasked: idCheck.masked,
-        availableBalanceMicros: 0,
-        lifetimeEarnedMicros: 0,
-        totalWithdrawnMicros: 0,
-        totalOnlineSeconds: 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-
-      batch.set(vaultRef, {
-        uid: activeUser.uid,
-        contactType: contactCheck.type,
-        contactValue: cleanContact,
-        authEmail: cleanAuthEmail,
-        passwordHash,
         usaIdHash,
         ssnLast4Hash,
         dobYear: parsedBirthYear,
         idExpiryDate,
         verificationMethod,
         verificationDigest: finalDigest,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
       });
 
-      try {
-        await batch.commit();
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, userPath);
-      }
-
-      const nowTs = Timestamp.now();
-      const createdAccount: UserAccount = {
-        uid: activeUser.uid,
-        displayName: cleanDisplayName,
-        identityVerified: true,
-        issuingState,
-        idType,
-        usaIdMasked: idCheck.masked,
-        availableBalanceMicros: 0,
-        lifetimeEarnedMicros: 0,
-        totalWithdrawnMicros: 0,
-        totalOnlineSeconds: 0,
-        createdAt: nowTs,
-        updatedAt: nowTs,
-      };
-
-      onAuthenticated(activeUser, createdAccount, true);
+      onAuthenticated(snapshot.account || undefined, true);
     } catch (err) {
-      setErrorMsg(formatAuthPopupError(err, 'Verify USA ID & Complete Sign Up'));
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Unable to create your Money Link account.'
+      );
     } finally {
       setSubmitting(false);
       setStatusMsg('');
@@ -492,7 +397,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     const check = validateContactInput(signInContact);
     if (!check.valid) {
       setInvalidField('signInContact');
-      setErrorMsg('Enter your registered @gmail.com address or mobile phone number.');
+      setErrorMsg('Enter your registered email address or mobile phone number.');
       signInContactRef.current?.focus();
       return;
     }
@@ -505,83 +410,25 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setSubmitting(true);
     try {
-      let activeUser = firebaseUser;
-      if (!activeUser) {
-        setStatusMsg('Verifying your Google security session...');
-        const cred = await signInWithPopup(auth, googleProvider);
-        activeUser = cred.user;
-      }
-
-      setStatusMsg('Checking your verified USA ID wallet...');
-
-      const userRef = doc(db, 'users', activeUser.uid);
-      const vaultRef = doc(db, 'users', activeUser.uid, 'private', 'vault');
-
-      let userSnap;
-      try {
-        userSnap = await getDoc(userRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, `users/${activeUser.uid}`);
-      }
-
-      if (!userSnap?.exists()) {
+      setStatusMsg('Unlocking your verified Money Link wallet...');
+      const snapshot = await signInAppAccount(check.normalized, signInPassword);
+      onAuthenticated(snapshot.account || undefined, false);
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'ACCOUNT_NOT_FOUND') {
         setContactInput(signInContact);
         setPassword(signInPassword);
         setConfirmPassword(signInPassword);
-        if (activeUser.displayName && !fullName) {
-          setFullName(activeUser.displayName);
-        }
         setMode('signup');
         setStep(1);
         setErrorMsg(
-          'No verified Money Link wallet found yet. Complete Sign Up and mandatory USA ID verification first.'
+          'No verified Money Link wallet found for this email or phone number yet. Complete Sign Up and mandatory USA ID verification first.'
         );
         return;
       }
-
-      const verifiedAcc = userSnap.data() as UserAccount;
-
-      let vaultSnap;
-      try {
-        vaultSnap = await getDoc(vaultRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, `users/${activeUser.uid}/private/vault`);
-      }
-
-      if (vaultSnap?.exists()) {
-        const vault = vaultSnap.data() as UserPrivateVault;
-        const inputHash = await sha256Hex(signInPassword);
-
-        const enteredLower = check.normalized.toLowerCase();
-        const storedContactLower = vault.contactValue.toLowerCase();
-        const storedEmailLower = vault.authEmail.toLowerCase();
-        const enteredDigits = signInContact.replace(/\D/g, '');
-        const storedDigits = vault.contactValue.replace(/\D/g, '');
-        const phoneDigitsMatch =
-          enteredDigits.length >= 7 &&
-          storedDigits.length >= 7 &&
-          (enteredDigits === storedDigits ||
-            enteredDigits.slice(-10) === storedDigits.slice(-10));
-
-        if (
-          enteredLower !== storedContactLower &&
-          enteredLower !== storedEmailLower &&
-          !phoneDigitsMatch
-        ) {
-          setInvalidField('signInContact');
-          setErrorMsg('The Gmail or phone number entered does not match this wallet.');
-          return;
-        }
-        if (vault.passwordHash !== inputHash) {
-          setInvalidField('signInPassword');
-          setErrorMsg('Incorrect password. Check your wallet password and try again.');
-          return;
-        }
-      }
-
-      onAuthenticated(activeUser, verifiedAcc);
-    } catch (err) {
-      setErrorMsg(formatAuthPopupError(err, 'Unlock Money Link Wallet'));
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Incorrect login details. Please try again.'
+      );
     } finally {
       setSubmitting(false);
       setStatusMsg('');
@@ -660,8 +507,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               Connect your phone &amp; earn +$0.10 fast ($10.00 in 3 minutes).
             </h1>
             <p className="text-xs text-sky-100/90">
-              Sign up with Gmail or phone + USA ID verification and cash out $10.00+ straight to any
-              local Nigerian bank.
+              Sign up with any email or phone + USA ID verification and cash out $10.00+ straight
+              to any local Nigerian bank.
             </p>
           </div>
 
@@ -821,7 +668,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               )}
 
               {/* Quick Resume Banner if Already Verified */}
-              {existingAccount && firebaseUser && (
+              {existingAccount && (
                 <div className="mt-5 p-4 rounded-2xl bg-emerald-50 border border-emerald-200/80 flex flex-wrap items-center justify-between gap-3">
                   <div className="text-xs text-emerald-950">
                     <p className="font-bold">Welcome back, {existingAccount.displayName}</p>
@@ -831,7 +678,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => onAuthenticated(firebaseUser, existingAccount)}
+                    onClick={() => onAuthenticated(existingAccount)}
                     className="px-4 py-2.5 min-h-[42px] text-xs font-bold bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 active:scale-[0.98] transition-all whitespace-nowrap shrink-0"
                   >
                     Open App Wallet
@@ -839,7 +686,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 </div>
               )}
 
-              {/* SIGN UP STEP 1: NAME, GMAIL OR PHONE, PASSWORD */}
+              {/* SIGN UP STEP 1: NAME, EMAIL OR PHONE, PASSWORD */}
               {mode === 'signup' && step === 1 && (
                 <form noValidate onSubmit={handleAdvanceToStep2} className="mt-6 space-y-4">
                   <div>
@@ -847,7 +694,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       Create your Money Link Wallet
                     </h2>
                     <p className="text-xs sm:text-sm text-slate-500 mt-1">
-                      Enter your full name, Gmail or phone number, and password. Step 2 verifies
+                      Enter your full name, email or phone number, and password. Step 2 verifies
                       your authentic USA ID code.
                     </p>
                   </div>
@@ -884,7 +731,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       htmlFor="signup-contact"
                       className="block text-xs font-bold text-slate-700 mb-1.5"
                     >
-                      Gmail Address or Phone Number
+                      Email Address or Phone Number
                     </label>
                     <input
                       ref={contactRef}
@@ -897,7 +744,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         if (invalidField === 'contactInput') setInvalidField('');
                         if (errorMsg) setErrorMsg('');
                       }}
-                      placeholder="yourname@gmail.com or phone number"
+                      placeholder="you@example.com or phone number"
                       className={`w-full min-h-[48px] px-4 py-3 text-sm bg-slate-50/70 border rounded-2xl focus:bg-white focus:outline-none focus:ring-2 transition-colors ${
                         invalidField === 'contactInput'
                           ? 'border-rose-500 ring-2 ring-rose-200 bg-rose-50/30 focus:ring-rose-500'
@@ -1546,7 +1393,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       Sign In to Money Link
                     </h2>
                     <p className="text-xs sm:text-sm text-slate-500 mt-1">
-                      Enter your registered Gmail or phone number and password to open your verified
+                      Enter your registered email or phone number and password to open your verified
                       wallet.
                     </p>
                   </div>
@@ -1556,7 +1403,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       htmlFor="signin-contact"
                       className="block text-xs font-bold text-slate-700 mb-1.5"
                     >
-                      Registered Gmail or Phone Number
+                      Registered Email or Phone Number
                     </label>
                     <input
                       ref={signInContactRef}
@@ -1568,7 +1415,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         if (invalidField === 'signInContact') setInvalidField('');
                         if (errorMsg) setErrorMsg('');
                       }}
-                      placeholder="yourname@gmail.com or phone number"
+                      placeholder="you@example.com or phone number"
                       className={`w-full min-h-[48px] px-4 py-3 text-sm bg-slate-50/70 border rounded-2xl focus:bg-white focus:outline-none focus:ring-2 ${
                         invalidField === 'signInContact'
                           ? 'border-rose-500 ring-2 ring-rose-200 focus:ring-rose-500'

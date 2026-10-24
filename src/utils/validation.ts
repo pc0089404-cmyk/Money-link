@@ -79,24 +79,25 @@ export function validateContactInput(raw: string): {
   if (!trimmed) {
     return {
       valid: false,
-      type: 'gmail',
+      type: 'email',
       normalized: '',
-      error: 'Enter your Gmail address or mobile phone number.',
+      error: 'Enter your email address or mobile phone number.',
     };
   }
 
   if (trimmed.includes('@')) {
     const lower = trimmed.toLowerCase();
-    const emailRegex = /^[a-zA-Z0-9._%+-]+@(gmail\.com|googlemail\.com)$/;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
     if (!emailRegex.test(lower)) {
       return {
         valid: false,
-        type: 'gmail',
+        type: 'email',
         normalized: lower,
-        error: 'Enter a valid @gmail.com address or mobile phone number.',
+        error: 'Enter a valid email address or mobile phone number.',
       };
     }
-    return { valid: true, type: 'gmail', normalized: lower };
+    const isGmail = lower.endsWith('@gmail.com') || lower.endsWith('@googlemail.com');
+    return { valid: true, type: isGmail ? 'gmail' : 'email', normalized: lower };
   }
 
   const digits = trimmed.replace(/\D/g, '');
@@ -105,7 +106,7 @@ export function validateContactInput(raw: string): {
       valid: false,
       type: 'phone',
       normalized: digits,
-      error: 'Enter a valid phone number (10–15 digits) or @gmail.com address.',
+      error: 'Enter a valid phone number (7–15 digits) or email address.',
     };
   }
 
