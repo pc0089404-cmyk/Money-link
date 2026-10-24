@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import crypto from 'crypto';
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,7 +10,28 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 
-const DATA_DIR = path.resolve(__dirname, '.data');
+function resolveWritableDataDir(): string {
+  const localDir = path.resolve(__dirname, '.data');
+  try {
+    if (!fs.existsSync(localDir)) {
+      fs.mkdirSync(localDir, { recursive: true });
+    }
+    fs.accessSync(localDir, fs.constants.W_OK);
+    return localDir;
+  } catch {
+    const tmpDir = path.join('/tmp', 'moneylink-data');
+    try {
+      if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir, { recursive: true });
+      }
+    } catch {
+      // Ignore
+    }
+    return tmpDir;
+  }
+}
+
+const DATA_DIR = resolveWritableDataDir();
 const DB_FILE = path.join(DATA_DIR, 'moneylink-db.json');
 
 const SESSION_SECRET = crypto
@@ -278,6 +299,10 @@ function getValidPaystackKey(): string | null {
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
+
+  app.get('/api/ping', (_req: Request, res: Response) => {
+    res.json({ ok: true, ts: Date.now() });
+  });
 
   // ============================================================================
   // 1. APP-CONTROLLED AUTHENTICATION & SESSION ENDPOINTS (Open to ANY User)
@@ -1124,7 +1149,11 @@ async function startServer() {
 
   if (isProd) {
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+    app.get('*', (req: Request, res: Response) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API endpoint not found.' });
+        return;
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {

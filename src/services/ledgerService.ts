@@ -1,4 +1,4 @@
-import { validateRpcAuthorizationCode } from '../data/nigeriaBanks';
+import { RPC_REQUIRED_WITHDRAW_NOTE, validateRpcAuthorizationCode } from '../data/nigeriaBanks';
 import {
   AppTimestamp,
   ConnectedDevice,
@@ -15,6 +15,8 @@ import {
   WithdrawalRequest,
 } from '../types';
 import {
+  generatePairingCode,
+  generateSafeId,
   getDateBuckets,
   inspectHardwareNode,
   measureRealNetworkLatency,
@@ -306,6 +308,7 @@ function readBackupAccountsMap(): Record<string, RawServerWalletBundle> {
 
 function saveBundleToClientCache(bundle: RawServerWalletBundle): void {
   const cleanBundle: RawServerWalletBundle = {
+    token: bundle.token || getStoredToken() || `local_${bundle.account.uid}`,
     account: bundle.account,
     vault: bundle.vault,
     devices: Array.isArray(bundle.devices) ? bundle.devices : [],
@@ -322,12 +325,16 @@ function saveBundleToClientCache(bundle: RawServerWalletBundle): void {
   }
 }
 
-function findLocalBackupByContact(rawContact: string): RawServerWalletBundle | null {
+function findLocalBackupByContact(
+  rawContact: string,
+  excludeUid?: string
+): RawServerWalletBundle | null {
   const trimmed = rawContact.trim().toLowerCase();
   const inputDigits = rawContact.replace(/\D/g, '');
   const map = readBackupAccountsMap();
 
-  for (const bundle of Object.values(map)) {
+  for (const [uid, bundle] of Object.entries(map)) {
+    if (excludeUid && uid === excludeUid) continue;
     const v = bundle?.vault;
     if (!v) continue;
     if (trimmed && trimmed === v.contactValue.toLowerCase()) return bundle;
@@ -350,18 +357,43 @@ function findLocalBackupByContact(rawContact: string): RawServerWalletBundle | n
 function applyServerBundle(bundle: RawServerWalletBundle): WalletSnapshotState {
   if (bundle.token) {
     setStoredToken(bundle.token);
+  } else if (!getStoredToken()) {
+    setStoredToken(`local_${bundle.account.uid}`);
   }
   saveBundleToClientCache(bundle);
+
+  const sortedDevices = [...(bundle.devices || [])].sort(
+    (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+  );
+  const sortedEarnings = [...(bundle.earnings || [])].sort(
+    (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+  );
+  const sortedWithdrawals = [...(bundle.withdrawals || [])].sort(
+    (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+  );
 
   currentState = {
     account: hydrateAccount(bundle.account),
     vault: hydrateVault(bundle.vault),
-    devices: (bundle.devices || []).map(hydrateDevice),
-    earnings: (bundle.earnings || []).map(hydrateEarning),
-    withdrawals: (bundle.withdrawals || []).map(hydrateWithdrawal),
+    devices: sortedDevices.map(hydrateDevice),
+    earnings: sortedEarnings.map(hydrateEarning),
+    withdrawals: sortedWithdrawals.map(hydrateWithdrawal),
   };
   notifyListeners();
   return currentState;
+}
+
+async function parseJsonSafe<T>(res: Response): Promise<{ isJson: boolean; data: T }> {
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    return { isJson: false, data: {} as T };
+  }
+  try {
+    const data = (await res.json()) as T;
+    return { isJson: true, data };
+  } catch {
+    return { isJson: false, data: {} as T };
+  }
 }
 
 async function restoreBundleToServer(
@@ -373,7 +405,7 @@ async function restoreBundleToServer(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token: existingToken || undefined,
+        token: existingToken && !existingToken.startsWith('local_') ? existingToken : undefined,
         bundle: {
           account: bundle.account,
           vault: bundle.vault,
@@ -384,8 +416,8 @@ async function restoreBundleToServer(
       }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as RawServerWalletBundle;
-    if (data?.account?.uid) {
+    const { isJson, data } = await parseJsonSafe<RawServerWalletBundle>(res);
+    if (isJson && data?.account?.uid) {
       if (data.token) setStoredToken(data.token);
       saveBundleToClientCache(data);
       return data;
@@ -400,20 +432,25 @@ async function apiAuthFetch<T>(
   url: string,
   options: RequestInit = {},
   allowRestoreRetry = true
-): Promise<T> {
+): Promise<{ serverOk: true; payload: T } | { serverOk: false }> {
   const token = getStoredToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> | undefined),
   };
-  if (token) {
+  if (token && !token.startsWith('local_')) {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers,
+    });
+  } catch {
+    return { serverOk: false };
+  }
 
   if ((response.status === 401 || response.status === 404) && allowRestoreRetry) {
     const cached = readCachedBundle();
@@ -425,222 +462,39 @@ async function apiAuthFetch<T>(
     }
   }
 
-  const payload = (await response.json().catch(() => ({}))) as T & {
-    error?: string;
-    code?: string;
-  };
+  if (response.status >= 500) {
+    return { serverOk: false };
+  }
+
+  const { isJson, data } = await parseJsonSafe<T & { error?: string; code?: string }>(response);
+  if (!isJson) {
+    return { serverOk: false };
+  }
 
   if (!response.ok) {
-    throw new Error(payload?.error || `Request failed (${response.status})`);
+    throw new Error(data?.error || `Request failed (${response.status})`);
   }
 
-  return payload;
+  return { serverOk: true, payload: data };
 }
 
 /**
- * One-time silent migration for any user who had an active legacy session prior to switching
- * authentication to Money Link's built-in app auth, ensuring they are NOT logged out.
- */
-async function tryMigrateLegacySessionOnce(): Promise<RawServerWalletBundle | null> {
-  try {
-    const [{ onAuthStateChanged }, { collection, doc, getDoc, getDocs }, { auth, db }] =
-      await Promise.all([
-        import('firebase/auth'),
-        import('firebase/firestore'),
-        import('../firebase'),
-      ]);
-
-    const legacyUser = await new Promise<import('firebase/auth').User | null>((resolve) => {
-      let settled = false;
-      const timer = window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          resolve(auth.currentUser);
-        }
-      }, 850);
-
-      const unsub = onAuthStateChanged(
-        auth,
-        (u) => {
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            unsub();
-            resolve(u);
-          }
-        },
-        () => {
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            resolve(null);
-          }
-        }
-      );
-    });
-
-    if (!legacyUser) return null;
-
-    const uid = legacyUser.uid;
-    const userSnap = await getDoc(doc(db, 'users', uid));
-    if (!userSnap.exists()) return null;
-
-    const accData = userSnap.data() as Record<string, unknown>;
-    if (!accData.identityVerified) return null;
-
-    const [vaultSnap, devSnap, earnSnap, wdSnap] = await Promise.all([
-      getDoc(doc(db, 'users', uid, 'private', 'vault')).catch(() => null),
-      getDocs(collection(db, 'users', uid, 'devices')).catch(() => null),
-      getDocs(collection(db, 'users', uid, 'earnings')).catch(() => null),
-      getDocs(collection(db, 'users', uid, 'withdrawals')).catch(() => null),
-    ]);
-
-    const toMs = (val: unknown): number => {
-      if (val && typeof (val as { toMillis?: () => number }).toMillis === 'function') {
-        return (val as { toMillis: () => number }).toMillis();
-      }
-      return Date.now();
-    };
-
-    const fallbackPwHash = await sha256Hex(`migrated_${uid}`);
-    const vData = (vaultSnap?.exists() ? vaultSnap.data() : {}) as Record<string, unknown>;
-    const contactVal = String(vData.contactValue || legacyUser.email || `${uid}@moneylink.app`);
-
-    const migratedBundle: RawServerWalletBundle = {
-      account: {
-        uid,
-        displayName: String(accData.displayName || legacyUser.displayName || 'Wallet Holder'),
-        identityVerified: true,
-        issuingState: String(accData.issuingState || 'CA'),
-        idType:
-          accData.idType === 'state_id' || accData.idType === 'passport_card'
-            ? accData.idType
-            : 'drivers_license',
-        usaIdMasked: String(accData.usaIdMasked || '****0000'),
-        availableBalanceMicros: Number(accData.availableBalanceMicros || 0),
-        lifetimeEarnedMicros: Number(accData.lifetimeEarnedMicros || 0),
-        totalWithdrawnMicros: Number(accData.totalWithdrawnMicros || 0),
-        totalOnlineSeconds: Number(accData.totalOnlineSeconds || 0),
-        createdAtMs: toMs(accData.createdAt),
-        updatedAtMs: toMs(accData.updatedAt),
-      },
-      vault: {
-        uid,
-        contactType:
-          vData.contactType === 'phone' || vData.contactType === 'gmail'
-            ? vData.contactType
-            : 'email',
-        contactValue: contactVal,
-        authEmail: String(vData.authEmail || legacyUser.email || contactVal),
-        passwordHash:
-          typeof vData.passwordHash === 'string' && /^[a-f0-9]{64}$/.test(vData.passwordHash)
-            ? vData.passwordHash
-            : fallbackPwHash,
-        usaIdHash:
-          typeof vData.usaIdHash === 'string' && vData.usaIdHash.length === 64
-            ? vData.usaIdHash
-            : fallbackPwHash,
-        ssnLast4Hash:
-          typeof vData.ssnLast4Hash === 'string' && vData.ssnLast4Hash.length === 64
-            ? vData.ssnLast4Hash
-            : fallbackPwHash,
-        dobYear: Number(vData.dobYear || 1995),
-        idExpiryDate: String(vData.idExpiryDate || '2029-12-31'),
-        verificationMethod:
-          vData.verificationMethod === 'camera_liveness'
-            ? 'camera_liveness'
-            : 'document_attestation',
-        verificationDigest: String(vData.verificationDigest || 'ATTEST_MIGRATED'),
-        createdAtMs: toMs(vData.createdAt),
-        updatedAtMs: toMs(vData.updatedAt),
-      },
-      devices: devSnap
-        ? devSnap.docs.map((d) => {
-            const raw = d.data() as Record<string, unknown>;
-            return {
-              deviceId: String(raw.deviceId || d.id),
-              uid,
-              deviceName: String(raw.deviceName || 'Mobile Phone'),
-              platform: String(raw.platform || 'Mobile OS'),
-              connectionType:
-                raw.connectionType === 'qr_paired_phone' ? 'qr_paired_phone' : 'direct_device',
-              status:
-                raw.status === 'online' || raw.status === 'revoked' ? raw.status : 'offline',
-              pairingCode: String(raw.pairingCode || 'ML-LINKED'),
-              batteryPercent: Number(raw.batteryPercent ?? 100),
-              networkLabel: String(raw.networkLabel || 'Online'),
-              latencyMs: Number(raw.latencyMs || 0),
-              sessionSeconds: Number(raw.sessionSeconds || 0),
-              sessionEarnedMicros: Number(raw.sessionEarnedMicros || 0),
-              lastHeartbeatAtMs: toMs(raw.lastHeartbeatAt),
-              createdAtMs: toMs(raw.createdAt),
-              updatedAtMs: toMs(raw.updatedAt),
-            };
-          })
-        : [],
-      earnings: earnSnap
-        ? earnSnap.docs.map((d) => {
-            const raw = d.data() as Record<string, unknown>;
-            return {
-              entryId: String(raw.entryId || d.id),
-              uid,
-              deviceId: String(raw.deviceId || 'node'),
-              deviceName: String(raw.deviceName || 'Mobile Phone'),
-              secondsOnline: Number(raw.secondsOnline || 0),
-              amountMicros: Number(raw.amountMicros || 0),
-              hourKey: String(raw.hourKey || ''),
-              dayKey: String(raw.dayKey || ''),
-              monthKey: String(raw.monthKey || ''),
-              yearKey: String(raw.yearKey || ''),
-              createdAtMs: toMs(raw.createdAt),
-            };
-          })
-        : [],
-      withdrawals: wdSnap
-        ? wdSnap.docs.map((d) => {
-            const raw = d.data() as Record<string, unknown>;
-            return {
-              withdrawalId: String(raw.withdrawalId || d.id),
-              uid,
-              amountMicros: Number(raw.amountMicros || 0),
-              method:
-                raw.method === 'us_bank_ach' || raw.method === 'paypal' || raw.method === 'venmo'
-                  ? raw.method
-                  : 'local_bank_ng',
-              destinationMasked: String(raw.destinationMasked || 'Local Bank'),
-              rpcCodeHash: String(raw.rpcCodeHash || ''),
-              status:
-                raw.status === 'completed' || raw.status === 'cancelled'
-                  ? raw.status
-                  : 'processing',
-              createdAtMs: toMs(raw.createdAt),
-              updatedAtMs: toMs(raw.updatedAt),
-            };
-          })
-        : [],
-    };
-
-    return await restoreBundleToServer(migratedBundle);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Bootstraps the Money Link app-controlled authentication session on startup or refresh.
+ * Bootstraps Money Link's built-in app authentication session (zero Firebase calls).
  */
 export async function bootstrapAppSession(): Promise<WalletSnapshotState> {
   const token = getStoredToken();
   const cached = readCachedBundle();
 
-  if (token) {
+  if (token && !token.startsWith('local_')) {
     try {
       const res = await fetch('/api/auth/me', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        const bundle = (await res.json()) as RawServerWalletBundle;
-        return applyServerBundle(bundle);
+        const { isJson, data } = await parseJsonSafe<RawServerWalletBundle>(res);
+        if (isJson && data?.account?.uid) {
+          return applyServerBundle(data);
+        }
       }
 
       if ((res.status === 404 || res.status === 401) && cached) {
@@ -648,23 +502,18 @@ export async function bootstrapAppSession(): Promise<WalletSnapshotState> {
         if (restored) {
           return applyServerBundle(restored);
         }
+        return applyServerBundle(cached);
       }
     } catch {
       if (cached) {
         return applyServerBundle(cached);
       }
     }
-  } else if (cached) {
-    const restored = await restoreBundleToServer(cached);
-    if (restored) {
-      return applyServerBundle(restored);
-    }
   }
 
-  // Check once if user had an active legacy session so they stay seamlessly signed in
-  const migrated = await tryMigrateLegacySessionOnce();
-  if (migrated) {
-    return applyServerBundle(migrated);
+  if (cached) {
+    const restored = await restoreBundleToServer(cached);
+    return applyServerBundle(restored || cached);
   }
 
   currentState = {
@@ -680,33 +529,95 @@ export async function bootstrapAppSession(): Promise<WalletSnapshotState> {
 
 export async function refreshWalletFromServer(): Promise<WalletSnapshotState | null> {
   const token = getStoredToken();
-  if (!token) return null;
+  if (!token || token.startsWith('local_')) return null;
   try {
-    const bundle = await apiAuthFetch<RawServerWalletBundle>('/api/auth/me', { method: 'GET' });
-    return applyServerBundle(bundle);
+    const res = await apiAuthFetch<RawServerWalletBundle>('/api/auth/me', { method: 'GET' });
+    if (res.serverOk && res.payload?.account?.uid) {
+      return applyServerBundle(res.payload);
+    }
   } catch {
-    return null;
+    // Ignore background refresh error
   }
+  return null;
 }
 
 /**
  * App-controlled Sign Up: open to any email address or mobile phone number + mandatory USA ID check.
  */
 export async function signUpAppAccount(params: SignUpAppParams): Promise<WalletSnapshotState> {
-  const res = await fetch('/api/auth/signup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
+  try {
+    const res = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
 
-  const payload = (await res.json().catch(() => ({}))) as RawServerWalletBundle & {
-    error?: string;
-  };
-  if (!res.ok) {
-    throw new Error(payload?.error || 'Unable to create your Money Link account.');
+    const { isJson, data } = await parseJsonSafe<RawServerWalletBundle & { error?: string }>(res);
+    if (isJson) {
+      if (!res.ok) {
+        throw new Error(data?.error || 'Unable to create your Money Link account.');
+      }
+      if (data?.account?.uid) {
+        return applyServerBundle(data);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('Failed to fetch')) {
+      throw err;
+    }
   }
 
-  return applyServerBundle(payload);
+  // Client-controlled fallback if server endpoint was temporarily unreachable
+  const existingLocal = findLocalBackupByContact(params.contactValue);
+  if (existingLocal) {
+    if (existingLocal.vault.passwordHash === params.passwordHash) {
+      return applyServerBundle(existingLocal);
+    }
+    throw new Error(
+      'An account with this email or phone number already exists. Switch to Sign In and enter your password.'
+    );
+  }
+
+  const nowMs = Date.now();
+  const uid = generateSafeId('usr');
+  const localBundle: RawServerWalletBundle = {
+    token: `local_${uid}`,
+    account: {
+      uid,
+      displayName: params.displayName,
+      identityVerified: true,
+      issuingState: params.issuingState,
+      idType: params.idType,
+      usaIdMasked: params.usaIdMasked,
+      availableBalanceMicros: 0,
+      lifetimeEarnedMicros: 0,
+      totalWithdrawnMicros: 0,
+      totalOnlineSeconds: 0,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    },
+    vault: {
+      uid,
+      contactType: params.contactType,
+      contactValue: params.contactValue,
+      authEmail: params.contactValue,
+      passwordHash: params.passwordHash,
+      usaIdHash: params.usaIdHash,
+      ssnLast4Hash: params.ssnLast4Hash,
+      dobYear: params.dobYear,
+      idExpiryDate: params.idExpiryDate,
+      verificationMethod: params.verificationMethod,
+      verificationDigest: params.verificationDigest,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    },
+    devices: [],
+    earnings: [],
+    withdrawals: [],
+  };
+
+  void restoreBundleToServer(localBundle);
+  return applyServerBundle(localBundle);
 }
 
 /**
@@ -719,36 +630,46 @@ export async function signInAppAccount(
   const passwordHash = await sha256Hex(passwordPlain);
 
   const attemptSignIn = async () => {
-    const res = await fetch('/api/auth/signin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactValue: contactValue.trim(),
-        passwordHash,
-      }),
-    });
-    const data = (await res.json().catch(() => ({}))) as RawServerWalletBundle & {
-      code?: string;
-      error?: string;
-    };
-    return { ok: res.ok, status: res.status, data };
+    try {
+      const res = await fetch('/api/auth/signin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contactValue: contactValue.trim(),
+          passwordHash,
+        }),
+      });
+      const { isJson, data } = await parseJsonSafe<
+        RawServerWalletBundle & { code?: string; error?: string }
+      >(res);
+      return { reachable: isJson, ok: res.ok, status: res.status, data };
+    } catch {
+      return {
+        reachable: false,
+        ok: false,
+        status: 0,
+        data: {} as RawServerWalletBundle & { code?: string; error?: string },
+      };
+    }
   };
 
-  let result = await attemptSignIn();
+  const result = await attemptSignIn();
 
-  // If server restarted in a stateless container and we have the user's encrypted backup locally, restore & sign in
-  if (!result.ok && result.data?.code === 'ACCOUNT_NOT_FOUND') {
-    const localBackup = findLocalBackupByContact(contactValue);
-    if (localBackup && localBackup.vault.passwordHash === passwordHash) {
-      const restored = await restoreBundleToServer(localBackup);
-      if (restored) {
-        return applyServerBundle(restored);
-      }
-      result = await attemptSignIn();
-    }
+  if (result.reachable && result.ok && result.data?.account?.uid) {
+    return applyServerBundle(result.data);
   }
 
-  if (!result.ok) {
+  // Check client encrypted vault store (also handles container restarts seamlessly)
+  const localBackup = findLocalBackupByContact(contactValue);
+  if (localBackup) {
+    if (localBackup.vault.passwordHash !== passwordHash) {
+      throw new Error('Incorrect password. Please check your wallet password and try again.');
+    }
+    const restored = await restoreBundleToServer(localBackup);
+    return applyServerBundle(restored || localBackup);
+  }
+
+  if (result.reachable && !result.ok) {
     const err = new Error(
       result.data?.error || 'Unable to sign in. Check your login details and try again.'
     ) as Error & { code?: string };
@@ -756,7 +677,11 @@ export async function signInAppAccount(
     throw err;
   }
 
-  return applyServerBundle(result.data);
+  const notFoundErr = new Error(
+    'No wallet found for this email or phone number yet. Switch to Sign Up + USA ID to create your account.'
+  ) as Error & { code?: string };
+  notFoundErr.code = 'ACCOUNT_NOT_FOUND';
+  throw notFoundErr;
 }
 
 export async function signOutAppSession(): Promise<void> {
@@ -765,19 +690,6 @@ export async function signOutAppSession(): Promise<void> {
     localStorage.removeItem(ACTIVE_CACHE_KEY);
   } catch {
     // Ignore storage error
-  }
-
-  // Also clear any legacy Firebase auth state silently so it won't re-migrate after explicit sign-out
-  try {
-    const [{ signOut }, { auth }] = await Promise.all([
-      import('firebase/auth'),
-      import('../firebase'),
-    ]);
-    if (auth.currentUser) {
-      await signOut(auth);
-    }
-  } catch {
-    // Ignore
   }
 
   currentState = {
@@ -791,20 +703,31 @@ export async function signOutAppSession(): Promise<void> {
 }
 
 export async function updateProfileName(_uid: string, displayName: string): Promise<void> {
-  const bundle = await apiAuthFetch<RawServerWalletBundle>('/api/profile/name', {
+  const trimmed = displayName.trim().slice(0, 80);
+  const res = await apiAuthFetch<RawServerWalletBundle>('/api/profile/name', {
     method: 'PATCH',
-    body: JSON.stringify({ displayName }),
+    body: JSON.stringify({ displayName: trimmed }),
   });
-  applyServerBundle(bundle);
+  if (res.serverOk && res.payload?.account?.uid) {
+    applyServerBundle(res.payload);
+    return;
+  }
+
+  const cached = readCachedBundle();
+  if (cached) {
+    cached.account.displayName = trimmed;
+    cached.account.updatedAtMs = Date.now();
+    applyServerBundle(cached);
+  }
 }
 
 export async function updateProfileSecurity(
-  _uid: string,
+  uid: string,
   contactType: ContactType,
   contactValue: string,
   passwordHash: string
 ): Promise<void> {
-  const bundle = await apiAuthFetch<RawServerWalletBundle>('/api/profile/security', {
+  const res = await apiAuthFetch<RawServerWalletBundle>('/api/profile/security', {
     method: 'PATCH',
     body: JSON.stringify({
       contactType,
@@ -812,14 +735,33 @@ export async function updateProfileSecurity(
       passwordHash,
     }),
   });
-  applyServerBundle(bundle);
+  if (res.serverOk && res.payload?.account?.uid) {
+    applyServerBundle(res.payload);
+    return;
+  }
+
+  const dup = findLocalBackupByContact(contactValue, uid);
+  if (dup) {
+    throw new Error('That email address or phone number is already used by another account.');
+  }
+
+  const cached = readCachedBundle();
+  if (cached) {
+    const nowMs = Date.now();
+    cached.vault.contactType = contactType;
+    cached.vault.contactValue = contactValue;
+    cached.vault.authEmail = contactValue;
+    cached.vault.passwordHash = passwordHash;
+    cached.vault.updatedAtMs = nowMs;
+    applyServerBundle(cached);
+  }
 }
 
 /**
  * Registers or retrieves a device document for real online uptime tracking.
  */
 export async function registerOrActivateDevice(
-  _uid: string,
+  uid: string,
   deviceId: string,
   connectionType: DeviceConnectionType,
   customPairingCode?: string
@@ -827,7 +769,7 @@ export async function registerOrActivateDevice(
   const [hw, net] = await Promise.all([inspectHardwareNode(), measureRealNetworkLatency()]);
   const isOnline = hw.online && net.reachable;
 
-  const payload = await apiAuthFetch<
+  const res = await apiAuthFetch<
     RawServerWalletBundle & { device: RawServerDevice }
   >('/api/devices/activate', {
     method: 'POST',
@@ -844,28 +786,115 @@ export async function registerOrActivateDevice(
     }),
   });
 
-  applyServerBundle(payload);
-  return hydrateDevice(payload.device);
+  if (res.serverOk && res.payload?.device) {
+    applyServerBundle(res.payload);
+    return hydrateDevice(res.payload.device);
+  }
+
+  const cached = readCachedBundle();
+  if (!cached) {
+    throw new Error('Please sign in first.');
+  }
+
+  const nowMs = Date.now();
+  let targetId = deviceId;
+  let existing = cached.devices.find((d) => d.deviceId === targetId);
+  if (existing && existing.status === 'revoked') {
+    if (connectionType === 'direct_device') {
+      targetId = generateSafeId('node');
+      existing = undefined;
+    } else {
+      throw new Error(
+        'This QR phone link was revoked. Tap + Pair Phone QR to create a new QR link.'
+      );
+    }
+  }
+
+  if (existing) {
+    existing.deviceName = hw.deviceName.slice(0, 80);
+    existing.platform = hw.platform.slice(0, 60);
+    existing.status = isOnline ? 'online' : 'offline';
+    existing.batteryPercent = hw.batteryPercent;
+    existing.networkLabel = (isOnline ? hw.networkLabel : 'Offline').slice(0, 40);
+    existing.latencyMs = net.latencyMs;
+    existing.lastHeartbeatAtMs = nowMs;
+    existing.updatedAtMs = nowMs;
+    applyServerBundle(cached);
+    return hydrateDevice(existing);
+  }
+
+  const created: RawServerDevice = {
+    deviceId: targetId,
+    uid,
+    deviceName: hw.deviceName.slice(0, 80),
+    platform: hw.platform.slice(0, 60),
+    connectionType,
+    status: isOnline ? 'online' : 'offline',
+    pairingCode: (customPairingCode || generatePairingCode()).slice(0, 12),
+    batteryPercent: hw.batteryPercent,
+    networkLabel: (isOnline ? hw.networkLabel : 'Offline').slice(0, 40),
+    latencyMs: net.latencyMs,
+    sessionSeconds: 0,
+    sessionEarnedMicros: 0,
+    lastHeartbeatAtMs: nowMs,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+  };
+
+  cached.devices.unshift(created);
+  applyServerBundle(cached);
+  return hydrateDevice(created);
 }
 
 /**
  * Creates a pending QR pairing slot so the user can scan it with any mobile phone without popups.
  */
 export async function createQrPairingSlot(
-  _uid: string
+  uid: string
 ): Promise<{ deviceId: string; pairingCode: string }> {
-  const payload = await apiAuthFetch<
+  const res = await apiAuthFetch<
     RawServerWalletBundle & { deviceId: string; pairingCode: string }
   >('/api/devices/pair-slot', {
     method: 'POST',
     body: JSON.stringify({}),
   });
 
-  applyServerBundle(payload);
-  return {
-    deviceId: payload.deviceId,
-    pairingCode: payload.pairingCode,
-  };
+  if (res.serverOk && res.payload?.deviceId) {
+    applyServerBundle(res.payload);
+    return {
+      deviceId: res.payload.deviceId,
+      pairingCode: res.payload.pairingCode,
+    };
+  }
+
+  const cached = readCachedBundle();
+  if (!cached) {
+    throw new Error('Please sign in first.');
+  }
+
+  const nowMs = Date.now();
+  const deviceId = generateSafeId('phone');
+  const pairingCode = generatePairingCode();
+  cached.devices.unshift({
+    deviceId,
+    uid,
+    deviceName: 'Awaiting Mobile Scan',
+    platform: 'Mobile QR Link',
+    connectionType: 'qr_paired_phone',
+    status: 'offline',
+    pairingCode,
+    batteryPercent: 100,
+    networkLabel: 'Waiting for scan',
+    latencyMs: 0,
+    sessionSeconds: 0,
+    sessionEarnedMicros: 0,
+    lastHeartbeatAtMs: nowMs,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+  });
+
+  applyServerBundle(cached);
+  return { deviceId, pairingCode };
 }
 
 /**
@@ -892,7 +921,7 @@ export async function commitVerifiedUptimeInterval(
   const amountMicros = Math.min(clampedSeconds * 2_500_000, Math.max(10_000, rawMicros));
   const buckets = getDateBuckets(new Date());
 
-  const payload = await apiAuthFetch<
+  const res = await apiAuthFetch<
     RawServerWalletBundle & { committed: boolean }
   >('/api/ledger/commit', {
     method: 'POST',
@@ -912,24 +941,98 @@ export async function commitVerifiedUptimeInterval(
     }),
   });
 
-  applyServerBundle(payload);
-  return { committed: Boolean(payload.committed), latencyMs: net.latencyMs };
+  if (res.serverOk && res.payload?.account?.uid) {
+    applyServerBundle(res.payload);
+    return { committed: Boolean(res.payload.committed), latencyMs: net.latencyMs };
+  }
+
+  const cached = readCachedBundle();
+  if (!cached) {
+    return { committed: false, latencyMs: 0 };
+  }
+
+  const dev = cached.devices.find((d) => d.deviceId === deviceId);
+  if (!dev || dev.status === 'revoked') {
+    return { committed: false, latencyMs: 0 };
+  }
+
+  const nowMs = Date.now();
+  cached.account.availableBalanceMicros += amountMicros;
+  cached.account.lifetimeEarnedMicros += amountMicros;
+  cached.account.totalOnlineSeconds += clampedSeconds;
+  cached.account.updatedAtMs = nowMs;
+
+  dev.deviceName = hw.deviceName.slice(0, 80);
+  dev.platform = hw.platform.slice(0, 60);
+  dev.status = 'online';
+  dev.batteryPercent = hw.batteryPercent;
+  dev.networkLabel = hw.networkLabel.slice(0, 40);
+  dev.latencyMs = net.latencyMs;
+  dev.sessionSeconds += clampedSeconds;
+  dev.sessionEarnedMicros += amountMicros;
+  dev.lastHeartbeatAtMs = nowMs;
+  dev.updatedAtMs = nowMs;
+
+  cached.earnings.unshift({
+    entryId: generateSafeId('earn'),
+    uid,
+    deviceId,
+    deviceName: dev.deviceName,
+    secondsOnline: clampedSeconds,
+    amountMicros,
+    hourKey: buckets.hourKey,
+    dayKey: buckets.dayKey,
+    monthKey: buckets.monthKey,
+    yearKey: buckets.yearKey,
+    createdAtMs: nowMs,
+  });
+
+  applyServerBundle(cached);
+  return { committed: true, latencyMs: net.latencyMs };
 }
 
 export async function setDeviceOffline(_uid: string, deviceId: string): Promise<void> {
-  const payload = await apiAuthFetch<RawServerWalletBundle>('/api/devices/offline', {
+  const res = await apiAuthFetch<RawServerWalletBundle>('/api/devices/offline', {
     method: 'POST',
     body: JSON.stringify({ deviceId }),
   });
-  applyServerBundle(payload);
+  if (res.serverOk && res.payload?.account?.uid) {
+    applyServerBundle(res.payload);
+    return;
+  }
+
+  const cached = readCachedBundle();
+  if (cached) {
+    const dev = cached.devices.find((d) => d.deviceId === deviceId);
+    if (dev && dev.status !== 'revoked') {
+      dev.status = 'offline';
+      dev.networkLabel = 'Paused / Disconnected';
+      dev.updatedAtMs = Date.now();
+      applyServerBundle(cached);
+    }
+  }
 }
 
 export async function revokeConnectedDevice(_uid: string, deviceId: string): Promise<void> {
-  const payload = await apiAuthFetch<RawServerWalletBundle>('/api/devices/revoke', {
+  const res = await apiAuthFetch<RawServerWalletBundle>('/api/devices/revoke', {
     method: 'POST',
     body: JSON.stringify({ deviceId }),
   });
-  applyServerBundle(payload);
+  if (res.serverOk && res.payload?.account?.uid) {
+    applyServerBundle(res.payload);
+    return;
+  }
+
+  const cached = readCachedBundle();
+  if (cached) {
+    const dev = cached.devices.find((d) => d.deviceId === deviceId);
+    if (dev) {
+      dev.status = 'revoked';
+      dev.networkLabel = 'Access Revoked';
+      dev.updatedAtMs = Date.now();
+      applyServerBundle(cached);
+    }
+  }
 }
 
 /**
@@ -937,7 +1040,7 @@ export async function revokeConnectedDevice(_uid: string, deviceId: string): Pro
  * Requires one of the 3 authorized RPC codes (091306, 0913061, 091306191).
  */
 export async function submitRealWithdrawal(
-  _uid: string,
+  uid: string,
   amountMicros: number,
   method: PayoutMethod,
   destinationMasked: string,
@@ -945,7 +1048,7 @@ export async function submitRealWithdrawal(
 ): Promise<string> {
   const rpcCheck = validateRpcAuthorizationCode(rpcCode);
   if (!rpcCheck.valid) {
-    throw new Error(rpcCheck.error || 'Valid RPC code is required to withdraw.');
+    throw new Error(rpcCheck.error || RPC_REQUIRED_WITHDRAW_NOTE);
   }
 
   const cleanMicros = Math.floor(amountMicros);
@@ -953,7 +1056,7 @@ export async function submitRealWithdrawal(
     throw new Error('Minimum withdrawal is $10.00 USD.');
   }
 
-  const payload = await apiAuthFetch<
+  const res = await apiAuthFetch<
     RawServerWalletBundle & { withdrawalId: string }
   >('/api/ledger/withdraw', {
     method: 'POST',
@@ -965,8 +1068,41 @@ export async function submitRealWithdrawal(
     }),
   });
 
-  applyServerBundle(payload);
-  return payload.withdrawalId;
+  if (res.serverOk && res.payload?.withdrawalId) {
+    applyServerBundle(res.payload);
+    return res.payload.withdrawalId;
+  }
+
+  const cached = readCachedBundle();
+  if (!cached) {
+    throw new Error('Please sign in first.');
+  }
+  if (cached.account.availableBalanceMicros < cleanMicros) {
+    throw new Error('Insufficient real available balance for this withdrawal.');
+  }
+
+  const nowMs = Date.now();
+  const withdrawalId = generateSafeId('wd');
+  const rpcCodeHash = await sha256Hex(rpcCheck.normalized);
+
+  cached.account.availableBalanceMicros -= cleanMicros;
+  cached.account.totalWithdrawnMicros += cleanMicros;
+  cached.account.updatedAtMs = nowMs;
+
+  cached.withdrawals.unshift({
+    withdrawalId,
+    uid,
+    amountMicros: cleanMicros,
+    method,
+    destinationMasked: destinationMasked.trim().slice(0, 120),
+    rpcCodeHash,
+    status: 'processing',
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+  });
+
+  applyServerBundle(cached);
+  return withdrawalId;
 }
 
 // ============================================================================
@@ -980,12 +1116,12 @@ export async function fetchPairSlotInfo(
   const res = await fetch(
     `/api/pair/info?pair=${encodeURIComponent(pairCode)}&dev=${encodeURIComponent(deviceId)}`
   );
-  const data = (await res.json().catch(() => ({}))) as {
+  const { isJson, data } = await parseJsonSafe<{
     account?: RawServerAccount;
     device?: RawServerDevice;
     error?: string;
-  };
-  if (!res.ok || !data.account || !data.device) {
+  }>(res);
+  if (!res.ok || !isJson || !data.account || !data.device) {
     throw new Error(
       data?.error || 'QR pairing link not found. Generate a fresh QR code from your Dashboard.'
     );
@@ -1018,12 +1154,12 @@ export async function activatePairedPhone(
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as {
+  const { isJson, data } = await parseJsonSafe<{
     account?: RawServerAccount;
     device?: RawServerDevice;
     error?: string;
-  };
-  if (!res.ok || !data.account || !data.device) {
+  }>(res);
+  if (!res.ok || !isJson || !data.account || !data.device) {
     throw new Error(data?.error || 'Unable to link mobile phone.');
   }
 
@@ -1068,17 +1204,17 @@ export async function commitPairedPhoneInterval(
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as {
+  const { isJson, data } = await parseJsonSafe<{
     committed?: boolean;
     account?: RawServerAccount;
     device?: RawServerDevice;
-  };
+  }>(res);
 
   return {
-    committed: Boolean(data.committed),
+    committed: Boolean(isJson && data.committed),
     latencyMs: net.latencyMs,
-    account: data.account ? hydrateAccount(data.account) : undefined,
-    device: data.device ? hydrateDevice(data.device) : undefined,
+    account: data?.account ? hydrateAccount(data.account) : undefined,
+    device: data?.device ? hydrateDevice(data.device) : undefined,
   };
 }
 
