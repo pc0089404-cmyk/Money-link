@@ -1,0 +1,421 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Primary Money Link account ledger and verified US identity summary.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full legal name matching US government identification.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "identityVerified": {
+          "type": "boolean",
+          "description": "Indicates completion of mandatory USA ID verification."
+        },
+        "issuingState": {
+          "type": "string",
+          "description": "Two-letter US state or territory code that issued the ID.",
+          "minLength": 2,
+          "maxLength": 2,
+          "pattern": "^[A-Z]{2}$"
+        },
+        "idType": {
+          "type": "string",
+          "description": "Type of US government ID verified.",
+          "enum": ["drivers_license", "state_id", "passport_card"]
+        },
+        "usaIdMasked": {
+          "type": "string",
+          "description": "Masked representation of the verified USA ID code.",
+          "minLength": 6,
+          "maxLength": 32
+        },
+        "availableBalanceMicros": {
+          "type": "integer",
+          "description": "Current withdrawable balance in micro-USD (1 USD = 1,000,000 micros)."
+        },
+        "lifetimeEarnedMicros": {
+          "type": "integer",
+          "description": "Cumulative real online earnings in micro-USD."
+        },
+        "totalWithdrawnMicros": {
+          "type": "integer",
+          "description": "Cumulative withdrawn funds in micro-USD."
+        },
+        "totalOnlineSeconds": {
+          "type": "integer",
+          "description": "Cumulative verified online seconds across connected devices."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of account creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of most recent ledger update."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "identityVerified",
+        "issuingState",
+        "idType",
+        "usaIdMasked",
+        "availableBalanceMicros",
+        "lifetimeEarnedMicros",
+        "totalWithdrawnMicros",
+        "totalOnlineSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateVault": {
+      "title": "UserPrivateVault",
+      "description": "Isolated PII and cryptographic KYC hashes for the account owner.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "contactType": {
+          "type": "string",
+          "enum": ["gmail", "phone"]
+        },
+        "contactValue": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "authEmail": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "passwordHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "usaIdHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ssnLast4Hash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "dobYear": {
+          "type": "integer"
+        },
+        "idExpiryDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "verificationMethod": {
+          "type": "string",
+          "enum": ["camera_liveness", "document_attestation"]
+        },
+        "verificationDigest": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "contactType",
+        "contactValue",
+        "authEmail",
+        "passwordHash",
+        "usaIdHash",
+        "ssnLast4Hash",
+        "dobYear",
+        "idExpiryDate",
+        "verificationMethod",
+        "verificationDigest",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ConnectedDevice": {
+      "title": "ConnectedDevice",
+      "description": "Real mobile phone or browser device connected for verified online uptime.",
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "connectionType": {
+          "type": "string",
+          "enum": ["qr_paired_phone", "direct_device"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["online", "offline", "revoked"]
+        },
+        "pairingCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 12,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "batteryPercent": {
+          "type": "integer"
+        },
+        "networkLabel": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "latencyMs": {
+          "type": "integer"
+        },
+        "sessionSeconds": {
+          "type": "integer"
+        },
+        "sessionEarnedMicros": {
+          "type": "integer"
+        },
+        "lastHeartbeatAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "deviceId",
+        "uid",
+        "deviceName",
+        "platform",
+        "connectionType",
+        "status",
+        "pairingCode",
+        "batteryPercent",
+        "networkLabel",
+        "latencyMs",
+        "sessionSeconds",
+        "sessionEarnedMicros",
+        "lastHeartbeatAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EarningEntry": {
+      "title": "EarningEntry",
+      "description": "Immutable verified online earning interval indexed by hour, day, month, and year.",
+      "type": "object",
+      "properties": {
+        "entryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "secondsOnline": {
+          "type": "integer"
+        },
+        "amountMicros": {
+          "type": "integer"
+        },
+        "hourKey": {
+          "type": "string",
+          "minLength": 13,
+          "maxLength": 13,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}$"
+        },
+        "dayKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "monthKey": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-[0-9]{2}$"
+        },
+        "yearKey": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 4,
+          "pattern": "^[0-9]{4}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "entryId",
+        "uid",
+        "deviceId",
+        "deviceName",
+        "secondsOnline",
+        "amountMicros",
+        "hourKey",
+        "dayKey",
+        "monthKey",
+        "yearKey",
+        "createdAt"
+      ]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Verified payout withdrawal request deducted atomically from available balance.",
+      "type": "object",
+      "properties": {
+        "withdrawalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "amountMicros": {
+          "type": "integer"
+        },
+        "method": {
+          "type": "string",
+          "enum": ["local_bank_ng", "us_bank_ach", "paypal", "venmo"]
+        },
+        "destinationMasked": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 120
+        },
+        "rpcCodeHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["processing", "completed", "cancelled"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "withdrawalId",
+        "uid",
+        "amountMicros",
+        "method",
+        "destinationMasked",
+        "rpcCodeHash",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserAccount",
+      "description": "Owner-only Money Link account ledger initialized at 0 balance with USA ID verification metadata."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": "UserPrivateVault",
+      "description": "Strictly isolated PII and cryptographic KYC digest vault."
+    },
+    "/users/{userId}/devices/{deviceId}": {
+      "schema": "ConnectedDevice",
+      "description": "Real paired mobile phones and active network nodes belonging to the user."
+    },
+    "/users/{userId}/earnings/{entryId}": {
+      "schema": "EarningEntry",
+      "description": "Append-only ledger of real verified online earning intervals."
+    },
+    "/users/{userId}/withdrawals/{withdrawalId}": {
+      "schema": "WithdrawalRequest",
+      "description": "Real payout withdrawal requests linked atomically to user balance deductions."
+    }
+  }
+}

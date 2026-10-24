@@ -1,0 +1,6 @@
+{
+  "name": "Money Link",
+  "description": "Connect your mobile phone in real time and earn verified payouts for active online uptime with identity-verified withdrawals and granular earnings tracking.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,450 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 & Phase 4.1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedEmail() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function userExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+    }
+
+    // Validation Blueprint: UserAccount
+    function isValidUserAccount(data) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'identityVerified',
+        'issuingState',
+        'idType',
+        'usaIdMasked',
+        'availableBalanceMicros',
+        'lifetimeEarnedMicros',
+        'totalWithdrawnMicros',
+        'totalOnlineSeconds',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'identityVerified',
+        'issuingState',
+        'idType',
+        'usaIdMasked',
+        'availableBalanceMicros',
+        'lifetimeEarnedMicros',
+        'totalWithdrawnMicros',
+        'totalOnlineSeconds',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.uid == request.auth.uid &&
+      data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80 &&
+      data.identityVerified is bool && data.identityVerified == true &&
+      data.issuingState is string && data.issuingState.size() == 2 && data.issuingState.matches('^[A-Z]{2}$') &&
+      data.idType is string && data.idType.size() <= 32 && data.idType in ['drivers_license', 'state_id', 'passport_card'] &&
+      data.usaIdMasked is string && data.usaIdMasked.size() >= 6 && data.usaIdMasked.size() <= 32 &&
+      data.availableBalanceMicros is int && data.availableBalanceMicros >= 0 && data.availableBalanceMicros <= 1000000000000 &&
+      data.lifetimeEarnedMicros is int && data.lifetimeEarnedMicros >= 0 && data.lifetimeEarnedMicros <= 1000000000000 &&
+      data.totalWithdrawnMicros is int && data.totalWithdrawnMicros >= 0 && data.totalWithdrawnMicros <= 1000000000000 &&
+      data.totalOnlineSeconds is int && data.totalOnlineSeconds >= 0 && data.totalOnlineSeconds <= 1000000000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // Action Helpers for UserAccount
+    function isAccrueEarningsAction() {
+      let deltaSec = incoming().totalOnlineSeconds - existing().totalOnlineSeconds;
+      let deltaMicros = incoming().lifetimeEarnedMicros - existing().lifetimeEarnedMicros;
+      return incoming().diff(existing()).affectedKeys().hasOnly([
+        'availableBalanceMicros',
+        'lifetimeEarnedMicros',
+        'totalOnlineSeconds',
+        'updatedAt'
+      ]) &&
+      incoming().uid == existing().uid &&
+      incoming().createdAt == existing().createdAt &&
+      incoming().updatedAt == request.time &&
+      deltaSec >= 1 && deltaSec <= 120 &&
+      deltaMicros >= 10000 && deltaMicros <= deltaSec * 2500000 &&
+      incoming().availableBalanceMicros == existing().availableBalanceMicros + deltaMicros;
+    }
+
+    function isWithdrawDeductAction() {
+      let deducted = existing().availableBalanceMicros - incoming().availableBalanceMicros;
+      return incoming().diff(existing()).affectedKeys().hasOnly([
+        'availableBalanceMicros',
+        'totalWithdrawnMicros',
+        'updatedAt'
+      ]) &&
+      incoming().uid == existing().uid &&
+      incoming().createdAt == existing().createdAt &&
+      incoming().updatedAt == request.time &&
+      deducted >= 10000000 &&
+      incoming().availableBalanceMicros >= 0 &&
+      incoming().totalWithdrawnMicros == existing().totalWithdrawnMicros + deducted;
+    }
+
+    function isProfileRenameAction() {
+      return incoming().diff(existing()).affectedKeys().hasOnly([
+        'displayName',
+        'updatedAt'
+      ]) &&
+      incoming().uid == existing().uid &&
+      incoming().createdAt == existing().createdAt &&
+      incoming().updatedAt == request.time;
+    }
+
+    // Validation Blueprint: UserPrivateVault
+    function isValidPrivateVault(data) {
+      return data.keys().hasAll([
+        'uid',
+        'contactType',
+        'contactValue',
+        'authEmail',
+        'passwordHash',
+        'usaIdHash',
+        'ssnLast4Hash',
+        'dobYear',
+        'idExpiryDate',
+        'verificationMethod',
+        'verificationDigest',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'contactType',
+        'contactValue',
+        'authEmail',
+        'passwordHash',
+        'usaIdHash',
+        'ssnLast4Hash',
+        'dobYear',
+        'idExpiryDate',
+        'verificationMethod',
+        'verificationDigest',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.uid == request.auth.uid &&
+      data.contactType is string && data.contactType.size() <= 16 && data.contactType in ['gmail', 'phone'] &&
+      data.contactValue is string && data.contactValue.size() >= 5 && data.contactValue.size() <= 120 &&
+      data.authEmail is string && data.authEmail.size() >= 5 && data.authEmail.size() <= 120 &&
+      data.passwordHash is string && data.passwordHash.size() == 64 && data.passwordHash.matches('^[a-f0-9]{64}$') &&
+      data.usaIdHash is string && data.usaIdHash.size() == 64 && data.usaIdHash.matches('^[a-f0-9]{64}$') &&
+      data.ssnLast4Hash is string && data.ssnLast4Hash.size() == 64 && data.ssnLast4Hash.matches('^[a-f0-9]{64}$') &&
+      data.dobYear is int && data.dobYear >= 1900 && data.dobYear <= 2008 &&
+      data.idExpiryDate is string && data.idExpiryDate.size() == 10 && data.idExpiryDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+      data.verificationMethod is string && data.verificationMethod.size() <= 32 && data.verificationMethod in ['camera_liveness', 'document_attestation'] &&
+      data.verificationDigest is string && data.verificationDigest.size() >= 16 && data.verificationDigest.size() <= 64 && data.verificationDigest.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ConnectedDevice
+    function isValidConnectedDevice(data, deviceId) {
+      return data.keys().hasAll([
+        'deviceId',
+        'uid',
+        'deviceName',
+        'platform',
+        'connectionType',
+        'status',
+        'pairingCode',
+        'batteryPercent',
+        'networkLabel',
+        'latencyMs',
+        'sessionSeconds',
+        'sessionEarnedMicros',
+        'lastHeartbeatAt',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'deviceId',
+        'uid',
+        'deviceName',
+        'platform',
+        'connectionType',
+        'status',
+        'pairingCode',
+        'batteryPercent',
+        'networkLabel',
+        'latencyMs',
+        'sessionSeconds',
+        'sessionEarnedMicros',
+        'lastHeartbeatAt',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.deviceId is string && data.deviceId.size() >= 1 && data.deviceId.size() <= 128 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') && data.deviceId == deviceId &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') && data.uid == request.auth.uid &&
+      data.deviceName is string && data.deviceName.size() >= 2 && data.deviceName.size() <= 80 &&
+      data.platform is string && data.platform.size() >= 2 && data.platform.size() <= 60 &&
+      data.connectionType is string && data.connectionType.size() <= 32 && data.connectionType in ['qr_paired_phone', 'direct_device'] &&
+      data.status is string && data.status.size() <= 16 && data.status in ['online', 'offline', 'revoked'] &&
+      data.pairingCode is string && data.pairingCode.size() >= 6 && data.pairingCode.size() <= 12 && data.pairingCode.matches('^[A-Z0-9\\-]+$') &&
+      data.batteryPercent is int && data.batteryPercent >= 0 && data.batteryPercent <= 100 &&
+      data.networkLabel is string && data.networkLabel.size() >= 2 && data.networkLabel.size() <= 40 &&
+      data.latencyMs is int && data.latencyMs >= 0 && data.latencyMs <= 10000 &&
+      data.sessionSeconds is int && data.sessionSeconds >= 0 && data.sessionSeconds <= 1000000000 &&
+      data.sessionEarnedMicros is int && data.sessionEarnedMicros >= 0 && data.sessionEarnedMicros <= 1000000000000 &&
+      data.lastHeartbeatAt is timestamp &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isDeviceHeartbeatAction() {
+      return existing().status != 'revoked' &&
+      incoming().diff(existing()).affectedKeys().hasOnly([
+        'deviceName',
+        'platform',
+        'status',
+        'batteryPercent',
+        'networkLabel',
+        'latencyMs',
+        'sessionSeconds',
+        'sessionEarnedMicros',
+        'lastHeartbeatAt',
+        'updatedAt'
+      ]) &&
+      incoming().uid == existing().uid &&
+      incoming().deviceId == existing().deviceId &&
+      incoming().createdAt == existing().createdAt &&
+      incoming().updatedAt == request.time &&
+      incoming().lastHeartbeatAt == request.time;
+    }
+
+    function isDeviceStateAction() {
+      return existing().status != 'revoked' &&
+      incoming().diff(existing()).affectedKeys().hasOnly([
+        'status',
+        'networkLabel',
+        'updatedAt'
+      ]) &&
+      incoming().uid == existing().uid &&
+      incoming().deviceId == existing().deviceId &&
+      incoming().createdAt == existing().createdAt &&
+      incoming().updatedAt == request.time;
+    }
+
+    // Validation Blueprint: EarningEntry
+    function isValidEarningEntry(data, entryId) {
+      return data.keys().hasAll([
+        'entryId',
+        'uid',
+        'deviceId',
+        'deviceName',
+        'secondsOnline',
+        'amountMicros',
+        'hourKey',
+        'dayKey',
+        'monthKey',
+        'yearKey',
+        'createdAt'
+      ]) &&
+      data.keys().hasOnly([
+        'entryId',
+        'uid',
+        'deviceId',
+        'deviceName',
+        'secondsOnline',
+        'amountMicros',
+        'hourKey',
+        'dayKey',
+        'monthKey',
+        'yearKey',
+        'createdAt'
+      ]) &&
+      data.entryId is string && data.entryId.size() >= 1 && data.entryId.size() <= 128 && data.entryId.matches('^[a-zA-Z0-9_\\-]+$') && data.entryId == entryId &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') && data.uid == request.auth.uid &&
+      data.deviceId is string && data.deviceId.size() >= 1 && data.deviceId.size() <= 128 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.deviceName is string && data.deviceName.size() >= 2 && data.deviceName.size() <= 80 &&
+      data.secondsOnline is int && data.secondsOnline >= 1 && data.secondsOnline <= 120 &&
+      data.amountMicros is int && data.amountMicros >= 10000 && data.amountMicros <= data.secondsOnline * 2500000 &&
+      data.hourKey is string && data.hourKey.size() == 13 && data.hourKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}$') &&
+      data.dayKey is string && data.dayKey.size() == 10 && data.dayKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+      data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$') &&
+      data.yearKey is string && data.yearKey.size() == 4 && data.yearKey.matches('^[0-9]{4}$') &&
+      data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: WithdrawalRequest (Enforces $10.00 Min, Nigeria Local Bank & Strict 3-Code RPC Hash Gate)
+    function isValidWithdrawalRequest(data, withdrawalId) {
+      return data.keys().hasAll([
+        'withdrawalId',
+        'uid',
+        'amountMicros',
+        'method',
+        'destinationMasked',
+        'rpcCodeHash',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'withdrawalId',
+        'uid',
+        'amountMicros',
+        'method',
+        'destinationMasked',
+        'rpcCodeHash',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.withdrawalId is string && data.withdrawalId.size() >= 1 && data.withdrawalId.size() <= 128 && data.withdrawalId.matches('^[a-zA-Z0-9_\\-]+$') && data.withdrawalId == withdrawalId &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') && data.uid == request.auth.uid &&
+      data.amountMicros is int && data.amountMicros >= 10000000 && data.amountMicros <= 1000000000000 &&
+      data.method is string && data.method.size() <= 32 && data.method in ['local_bank_ng', 'us_bank_ach', 'paypal', 'venmo'] &&
+      data.destinationMasked is string && data.destinationMasked.size() >= 4 && data.destinationMasked.size() <= 120 &&
+      data.rpcCodeHash is string && data.rpcCodeHash.size() == 64 && data.rpcCodeHash.matches('^[a-f0-9]{64}$') &&
+      data.rpcCodeHash in [
+        '62452a2c45806a6b9b2da56ae36ffbc53a9f4d82e334825153561aa9efc362d1',
+        'ab3146fb5e017989a2534d263a19a0a1f82c2023ea9145625ae40761cefeb1a8',
+        '6e1f611bae39a45308daf1b6faa2be7a079301fb4c44de8b7ab0322a37eb1a9c'
+      ] &&
+      data.status is string && data.status.size() <= 24 && data.status in ['processing', 'completed', 'cancelled'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // Collection 1: /users/{userId}
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserAccount(incoming()) &&
+        incoming().availableBalanceMicros == 0 &&
+        incoming().lifetimeEarnedMicros == 0 &&
+        incoming().totalWithdrawnMicros == 0 &&
+        incoming().totalOnlineSeconds == 0 &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/users/$(userId)/private/vault);
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserAccount(incoming()) &&
+        (isAccrueEarningsAction() || isWithdrawDeductAction() || isProfileRenameAction());
+      allow delete: if false;
+
+      // Subcollection 2: /users/{userId}/private/{docId} (PII Split Collection)
+      match /private/{docId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(docId) && docId == 'vault' && userExists(userId);
+        allow list: if false;
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          docId == 'vault' &&
+          isValidPrivateVault(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (userExists(userId) || existsAfter(/databases/$(database)/documents/users/$(userId)));
+        allow update: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          docId == 'vault' &&
+          isValidPrivateVault(incoming()) &&
+          userExists(userId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['contactType', 'contactValue', 'passwordHash', 'updatedAt']) &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+
+      // Subcollection 3: /users/{userId}/devices/{deviceId}
+      match /devices/{deviceId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(deviceId) && userExists(userId);
+        allow list: if isOwner(userId) && existing().uid == request.auth.uid;
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          isValidConnectedDevice(incoming(), deviceId) &&
+          incoming().sessionSeconds == 0 &&
+          incoming().sessionEarnedMicros == 0 &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          incoming().lastHeartbeatAt == request.time &&
+          userExists(userId);
+        allow update: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          isValidConnectedDevice(incoming(), deviceId) &&
+          userExists(userId) &&
+          (isDeviceHeartbeatAction() || isDeviceStateAction());
+        allow delete: if false;
+      }
+
+      // Subcollection 4: /users/{userId}/earnings/{entryId}
+      match /earnings/{entryId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(entryId) && userExists(userId);
+        allow list: if isOwner(userId) && existing().uid == request.auth.uid;
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(entryId) &&
+          isValidEarningEntry(incoming(), entryId) &&
+          incoming().createdAt == request.time &&
+          userExists(userId) &&
+          exists(/databases/$(database)/documents/users/$(userId)/devices/$(incoming().deviceId)) &&
+          getAfter(/databases/$(database)/documents/users/$(userId)).data.updatedAt == request.time &&
+          getAfter(/databases/$(database)/documents/users/$(userId)).data.lifetimeEarnedMicros -
+            get(/databases/$(database)/documents/users/$(userId)).data.lifetimeEarnedMicros == incoming().amountMicros;
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // Subcollection 5: /users/{userId}/withdrawals/{withdrawalId}
+      match /withdrawals/{withdrawalId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(withdrawalId) && userExists(userId);
+        allow list: if isOwner(userId) && existing().uid == request.auth.uid;
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(withdrawalId) &&
+          isValidWithdrawalRequest(incoming(), withdrawalId) &&
+          incoming().status == 'processing' &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          userExists(userId) &&
+          getAfter(/databases/$(database)/documents/users/$(userId)).data.updatedAt == request.time &&
+          get(/databases/$(database)/documents/users/$(userId)).data.availableBalanceMicros -
+            getAfter(/databases/$(database)/documents/users/$(userId)).data.availableBalanceMicros == incoming().amountMicros;
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+  }
+}
