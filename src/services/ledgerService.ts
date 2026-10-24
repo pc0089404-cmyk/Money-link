@@ -5,6 +5,7 @@ import {
   ContactType,
   DeviceConnectionType,
   EarningEntry,
+  GIFT_150_MICROS,
   MICROS_PER_SECOND,
   MIN_WITHDRAWAL_MICROS,
   PayoutMethod,
@@ -38,6 +39,7 @@ interface RawServerAccount {
   lifetimeEarnedMicros: number;
   totalWithdrawnMicros: number;
   totalOnlineSeconds: number;
+  gift150Claimed?: boolean;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -155,6 +157,7 @@ function hydrateAccount(raw: RawServerAccount): UserAccount {
     lifetimeEarnedMicros: Number(raw.lifetimeEarnedMicros || 0),
     totalWithdrawnMicros: Number(raw.totalWithdrawnMicros || 0),
     totalOnlineSeconds: Number(raw.totalOnlineSeconds || 0),
+    gift150Claimed: Boolean(raw.gift150Claimed),
     createdAt: makeTimestamp(raw.createdAtMs),
     updatedAt: makeTimestamp(raw.updatedAtMs),
   };
@@ -593,6 +596,7 @@ export async function signUpAppAccount(params: SignUpAppParams): Promise<WalletS
       lifetimeEarnedMicros: 0,
       totalWithdrawnMicros: 0,
       totalOnlineSeconds: 0,
+      gift150Claimed: false,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     },
@@ -1033,6 +1037,57 @@ export async function revokeConnectedDevice(_uid: string, deviceId: string): Pro
       applyServerBundle(cached);
     }
   }
+}
+
+/**
+ * Credits the one-time $150.00 active user gift to the user's wallet balance after the 10-second loading animation.
+ */
+export async function claimUserGift150(uid: string): Promise<WalletSnapshotState> {
+  const res = await apiAuthFetch<RawServerWalletBundle & { claimedNow?: boolean }>(
+    '/api/ledger/claim-gift',
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
+  );
+
+  if (res.serverOk && res.payload?.account?.uid) {
+    return applyServerBundle(res.payload);
+  }
+
+  const cached = readCachedBundle();
+  if (!cached) {
+    return currentState;
+  }
+
+  if (!cached.account.gift150Claimed) {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const buckets = getDateBuckets(now);
+
+    cached.account.availableBalanceMicros += GIFT_150_MICROS;
+    cached.account.lifetimeEarnedMicros += GIFT_150_MICROS;
+    cached.account.gift150Claimed = true;
+    cached.account.updatedAtMs = nowMs;
+
+    cached.earnings.unshift({
+      entryId: generateSafeId('gift'),
+      uid,
+      deviceId: 'gift_reward_150',
+      deviceName: 'Active User Gift ($150.00)',
+      secondsOnline: 10,
+      amountMicros: GIFT_150_MICROS,
+      hourKey: buckets.hourKey,
+      dayKey: buckets.dayKey,
+      monthKey: buckets.monthKey,
+      yearKey: buckets.yearKey,
+      createdAtMs: nowMs,
+    });
+
+    void restoreBundleToServer(cached);
+  }
+
+  return applyServerBundle(cached);
 }
 
 /**

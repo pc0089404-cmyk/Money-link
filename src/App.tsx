@@ -26,6 +26,7 @@ import { MobileNodeView } from './components/MobileNodeView';
 import { MoneyLinkLoader } from './components/MoneyLinkLoader';
 import { MoneyLinkLogo } from './components/MoneyLinkLogo';
 import { ProfilePage } from './components/ProfilePage';
+import { UserGiftNoticeModal } from './components/UserGiftNoticeModal';
 import { WithdrawPage } from './components/WithdrawPage';
 import { BOOST_APPS, formatBoostMultiplierLabel } from './data/boostApps';
 import {
@@ -561,6 +562,8 @@ function MoneyLinkWorkspace() {
 
   return (
     <div className="min-h-screen bg-[#F4F7FB] text-slate-900 flex flex-col relative overflow-x-clip">
+      <UserGiftNoticeModal account={account} />
+
       {/* Soft Cool Ambient Wash */}
       <div className="pointer-events-none fixed top-0 inset-x-0 h-80 bg-gradient-to-b from-sky-100/60 via-indigo-50/20 to-transparent z-0" />
 

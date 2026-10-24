@@ -11,6 +11,7 @@ export const HEARTBEAT_COMMIT_SECONDS = 9; // 9 seconds per server ledger commit
 export const MICROS_PER_SECOND = 55_556; // Base ~$0.0556/sec ($10.00 in 3 minutes)
 export const MAX_BOOST_MULTIPLIER = 20; // Safe ceiling
 export const MIN_WITHDRAWAL_MICROS = 10_000_000; // $10.00 minimum real withdrawal
+export const GIFT_150_MICROS = 150_000_000; // $150.00 reward gift for every active user
 
 export type UsaIdType = 'drivers_license' | 'state_id' | 'passport_card';
 export type ContactType = 'gmail' | 'email' | 'phone';
@@ -41,6 +42,7 @@ export interface UserAccount {
   lifetimeEarnedMicros: number;
   totalWithdrawnMicros: number;
   totalOnlineSeconds: number;
+  gift150Claimed?: boolean;
   createdAt: AppTimestamp | null;
   updatedAt: AppTimestamp | null;
 }

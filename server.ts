@@ -47,6 +47,7 @@ const VALID_RPC_CODES = new Set<string>(['091306', '0913061', '091306191']);
 const RPC_REQUIRED_NOTE =
   'You need your RPC to withdraw. Kindly buy from our official website.';
 const MIN_WITHDRAWAL_MICROS = 10_000_000;
+const GIFT_150_MICROS = 150_000_000;
 
 interface ServerUserAccount {
   uid: string;
@@ -59,6 +60,7 @@ interface ServerUserAccount {
   lifetimeEarnedMicros: number;
   totalWithdrawnMicros: number;
   totalOnlineSeconds: number;
+  gift150Claimed?: boolean;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -399,6 +401,7 @@ async function startServer() {
         lifetimeEarnedMicros: 0,
         totalWithdrawnMicros: 0,
         totalOnlineSeconds: 0,
+        gift150Claimed: false,
         createdAtMs: nowMs,
         updatedAtMs: nowMs,
       },
@@ -513,7 +516,12 @@ async function startServer() {
         }
       }
       dbStore.users[uid] = {
-        account: { ...bundle.account, uid, identityVerified: true },
+        account: {
+          ...bundle.account,
+          uid,
+          identityVerified: true,
+          gift150Claimed: Boolean(bundle.account.gift150Claimed),
+        },
         vault: { ...bundle.vault, uid },
         devices: devicesMap,
         earnings: Array.isArray(bundle.earnings) ? bundle.earnings : [],
@@ -846,6 +854,59 @@ async function startServer() {
     saveDatabase();
     res.json({
       committed: true,
+      ...serializeWalletBundle(record),
+    });
+  });
+
+  app.post('/api/ledger/claim-gift', (req: Request, res: Response) => {
+    const uid = extractBearerUid(req);
+    if (!uid || !dbStore.users[uid]) {
+      res.status(401).json({ error: 'Please sign in first.' });
+      return;
+    }
+
+    const record = dbStore.users[uid];
+    if (record.account.gift150Claimed) {
+      res.json({
+        claimedNow: false,
+        ...serializeWalletBundle(record),
+      });
+      return;
+    }
+
+    const now = new Date();
+    const nowMs = now.getTime();
+    const y = String(now.getFullYear());
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    const h = String(now.getHours()).padStart(2, '0');
+
+    record.account.availableBalanceMicros += GIFT_150_MICROS;
+    record.account.lifetimeEarnedMicros += GIFT_150_MICROS;
+    record.account.gift150Claimed = true;
+    record.account.updatedAtMs = nowMs;
+
+    record.earnings.unshift({
+      entryId: `gift_${nowMs}_${crypto.randomBytes(4).toString('hex')}`,
+      uid,
+      deviceId: 'gift_reward_150',
+      deviceName: 'Active User Gift ($150.00)',
+      secondsOnline: 10,
+      amountMicros: GIFT_150_MICROS,
+      hourKey: `${y}-${m}-${d}T${h}`,
+      dayKey: `${y}-${m}-${d}`,
+      monthKey: `${y}-${m}`,
+      yearKey: y,
+      createdAtMs: nowMs,
+    });
+
+    if (record.earnings.length > 500) {
+      record.earnings.length = 500;
+    }
+
+    saveDatabase();
+    res.json({
+      claimedNow: true,
       ...serializeWalletBundle(record),
     });
   });
