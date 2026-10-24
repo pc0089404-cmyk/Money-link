@@ -1092,7 +1092,7 @@ export async function claimUserGift150(uid: string): Promise<WalletSnapshotState
 
 /**
  * Submits a real withdrawal request and deducts from available balance.
- * Requires one of the 3 authorized RPC codes (091306, 0913061, 091306191).
+ * Requires authorized RPC code (5567 0913 8890) and places payout in 24-hour pending queue.
  */
 export async function submitRealWithdrawal(
   uid: string,

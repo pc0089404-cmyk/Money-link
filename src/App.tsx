@@ -725,6 +725,7 @@ function MoneyLinkWorkspace() {
               account={account}
               devices={devices}
               earnings={earnings}
+              withdrawals={withdrawals}
               localConnected={localConnected}
               localConnecting={localConnecting}
               browserOnline={browserOnline}

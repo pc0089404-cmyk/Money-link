@@ -1318,17 +1318,26 @@ export function detectLikelyBanksForNuban(accountNumber: string): NigeriaBank[] 
   return matches.slice(0, 6);
 }
 
-export const VALID_RPC_CODES = new Set<string>(['091306', '0913061', '091306191']);
+export const VALID_RPC_CODES = new Set<string>([
+  '556709138890',
+  '5567',
+  '0913',
+  '8890',
+]);
 
 export const RPC_REQUIRED_WITHDRAW_NOTE =
   'You need your RPC to withdraw. Kindly buy from our official website.';
+
+export function normalizeRpcCodeInput(raw: string): string {
+  return raw.trim().replace(/[\s-]+/g, '');
+}
 
 export function validateRpcAuthorizationCode(raw: string): {
   valid: boolean;
   normalized: string;
   error?: string;
 } {
-  const cleaned = raw.trim();
+  const cleaned = normalizeRpcCodeInput(raw);
   if (!cleaned) {
     return {
       valid: false,

@@ -5,6 +5,7 @@ import {
   BarChart3,
   Check,
   ChevronRight,
+  Clock,
   Copy,
   Pause,
   Play,
@@ -26,6 +27,7 @@ import {
   MIN_WITHDRAWAL_MICROS,
   TICKS_PER_COMMIT,
   UserAccount,
+  WithdrawalRequest,
 } from '../types';
 import {
   formatDurationSeconds,
@@ -38,6 +40,7 @@ interface DashboardPageProps {
   account: UserAccount;
   devices: ConnectedDevice[];
   earnings: EarningEntry[];
+  withdrawals?: WithdrawalRequest[];
   localConnected: boolean;
   localConnecting: boolean;
   browserOnline: boolean;
@@ -57,6 +60,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   account,
   devices,
   earnings,
+  withdrawals = [],
   localConnected,
   localConnecting,
   browserOnline,
@@ -89,6 +93,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
   const activeDevices = devices.filter((d) => d.status !== 'revoked');
   const onlineCount = activeDevices.filter((d) => d.status === 'online').length;
+  const pendingWithdrawals = withdrawals.filter((w) => w.status === 'processing');
+  const totalPendingWithdrawalMicros = pendingWithdrawals.reduce(
+    (sum, w) => sum + w.amountMicros,
+    0
+  );
 
   const firstName = account.displayName.split(' ')[0] || account.displayName;
   const currentTickMicros = Math.round(MICROS_PER_TICK * activeBoostMultiplier);
@@ -278,6 +287,39 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           </button>
         </div>
       </section>
+
+      {/* Active Pending Withdrawal Banner (Displays Amount + 24-Hour Delivery Notice) */}
+      {pendingWithdrawals.length > 0 && (
+        <section className="rounded-[28px] bg-amber-50/90 border border-amber-300 p-5 sm:p-6 flex flex-wrap items-center justify-between gap-4 shadow-2xs">
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-xs font-extrabold uppercase tracking-wider text-amber-800">
+                Pending Withdrawal ({pendingWithdrawals.length})
+              </p>
+              <p className="text-xl sm:text-2xl font-extrabold font-mono tabular-nums text-slate-900">
+                {formatUsdMicros(totalPendingWithdrawalMicros, 2)}
+              </p>
+              <p className="text-xs sm:text-sm font-bold text-amber-900">
+                Pending withdrawal will be sent within 24 hours ·{' '}
+                <span className="font-medium text-slate-700">
+                  {pendingWithdrawals[0].destinationMasked}
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigate(AppPage.WITHDRAW)}
+            className="min-h-[40px] px-4 py-2 text-xs font-bold text-amber-950 bg-amber-200/70 hover:bg-amber-200 rounded-xl transition-colors whitespace-nowrap shrink-0"
+          >
+            View Payout Status
+          </button>
+        </section>
+      )}
 
       {/* 2 Spacious Bento Cards: Live Stream Ring + $10.00 Cashout Milestone */}
       <section className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">

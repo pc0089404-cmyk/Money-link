@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Clock,
   Eye,
   EyeOff,
   KeyRound,
@@ -51,6 +52,13 @@ interface AccountVerificationState {
   verifiedAccountName?: string;
   nubanValid?: boolean;
   message?: string;
+}
+
+interface SubmittedWithdrawalReceipt {
+  withdrawalId: string;
+  amountMicros: number;
+  destinationMasked: string;
+  createdAtMs: number;
 }
 
 export const WithdrawPage: React.FC<WithdrawPageProps> = ({
@@ -104,6 +112,7 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [latestReceipt, setLatestReceipt] = useState<SubmittedWithdrawalReceipt | null>(null);
 
   const inlineDropdownRef = useRef<HTMLDivElement | null>(null);
 
@@ -398,16 +407,23 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
         dest.masked,
         rpcCheck.normalized
       );
+      const submittedNow = Date.now();
       setAmountInput('');
       setConfirmPassword('');
       setRpcCode('');
       setRpcVerified(false);
       setRpcNoteVisible(false);
+      setLatestReceipt({
+        withdrawalId: wdId,
+        amountMicros: requestedMicros,
+        destinationMasked: dest.masked,
+        createdAtMs: submittedNow,
+      });
       setSuccessMsg(
-        `Withdrawal ${wdId} for ${formatUsdMicros(
+        `Amount: ${formatUsdMicros(
           requestedMicros,
           2
-        )} authorized and sent to ${dest.masked}.`
+        )} · Pending withdrawal will be sent within 24 hours.`
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Withdrawal submission failed.');
@@ -438,8 +454,8 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
       {submitting && (
         <MoneyLinkLoader
           variant="overlay"
-          title="Sending Your Cashout"
-          subtitle="Authorizing your RPC verification & transferring funds to your bank..."
+          title="Submitting Withdrawal"
+          subtitle="Authorizing your RPC verification & scheduling your 24-hour bank payout..."
           badgeText="Protected Bank Settlement"
         />
       )}
@@ -467,14 +483,14 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
 
           <div className="flex items-center gap-6 text-xs text-sky-100">
             <div>
-              <p className="text-sky-200/80">Processing</p>
+              <p className="text-amber-200/95 font-semibold">Pending (24h)</p>
               <p className="text-sm font-extrabold font-mono tabular-nums text-white mt-0.5">
                 {formatUsdMicros(processingMicros, 2)}
               </p>
             </div>
             <div className="h-8 w-px bg-white/15" />
             <div>
-              <p className="text-sky-200/80">Total Paid</p>
+              <p className="text-sky-200/80">Total Requested</p>
               <p className="text-sm font-extrabold font-mono tabular-nums text-white mt-0.5">
                 {formatUsdMicros(account.totalWithdrawnMicros, 2)}
               </p>
@@ -501,6 +517,43 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Prominent Pending Withdrawal Receipt Banner upon Submitting */}
+      {latestReceipt && (
+        <section
+          role="status"
+          aria-live="polite"
+          className="rounded-[28px] bg-amber-50/90 border border-amber-300 p-6 sm:p-7 shadow-sm flex flex-wrap items-center justify-between gap-5"
+        >
+          <div className="flex items-start gap-4 min-w-0">
+            <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <Clock className="w-6 h-6" />
+            </div>
+            <div className="space-y-1 min-w-0">
+              <p className="text-xs font-extrabold uppercase tracking-wider text-amber-800">
+                Pending Withdrawal · Scheduled for Payout
+              </p>
+              <p className="text-2xl sm:text-3xl font-extrabold font-mono tabular-nums text-slate-900">
+                {formatUsdMicros(latestReceipt.amountMicros, 2)}
+              </p>
+              <p className="text-sm font-bold text-amber-900">
+                Pending withdrawal will be sent within 24 hours.
+              </p>
+              <p className="text-xs text-slate-600 truncate">
+                Destination: {latestReceipt.destinationMasked} · Ref {latestReceipt.withdrawalId}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setLatestReceipt(null)}
+            className="min-h-[40px] px-4 py-2 text-xs font-bold text-amber-950 bg-amber-200/70 hover:bg-amber-200 rounded-xl transition-colors whitespace-nowrap shrink-0"
+          >
+            Done
+          </button>
+        </section>
+      )}
 
       {/* Closer, Balanced 2-Column Layout: Left = Cashout Form, Right = Payout History */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
@@ -951,10 +1004,10 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
                     id="rpc-code-input"
                     type={showRpcCode ? 'text' : 'password'}
                     inputMode="numeric"
-                    maxLength={16}
+                    maxLength={24}
                     value={rpcCode}
                     onChange={(e) => {
-                      setRpcCode(e.target.value.trim());
+                      setRpcCode(e.target.value);
                       setRpcVerified(false);
                       setRpcNoteVisible(false);
                       if (errorMsg) setErrorMsg('');
@@ -1008,10 +1061,20 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
               </div>
             )}
 
-            {successMsg && (
-              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-start gap-3 text-xs font-bold text-emerald-950">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                <span>{successMsg}</span>
+            {successMsg && latestReceipt && (
+              <div
+                role="status"
+                className="p-4 rounded-2xl bg-amber-50 border border-amber-300 flex items-start gap-3 text-xs sm:text-sm font-bold text-amber-950"
+              >
+                <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="text-sm font-extrabold font-mono tabular-nums text-slate-900">
+                    Withdrawal Amount: {formatUsdMicros(latestReceipt.amountMicros, 2)} · Status: Pending
+                  </p>
+                  <p className="text-xs sm:text-sm font-bold text-amber-900">
+                    Pending withdrawal will be sent within 24 hours ({latestReceipt.destinationMasked}).
+                  </p>
+                </div>
               </div>
             )}
 
@@ -1052,7 +1115,7 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  {st}
+                  {st === 'processing' ? 'Pending' : st}
                 </button>
               ))}
             </div>
@@ -1066,31 +1129,66 @@ export const WithdrawPage: React.FC<WithdrawPageProps> = ({
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-slate-100 max-h-[420px] overflow-y-auto">
-              {filteredWithdrawals.map((wd) => (
-                <div
-                  key={wd.withdrawalId}
-                  className="px-6 py-4 min-h-[64px] flex items-center justify-between gap-3"
-                >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-sky-50 text-[#0A84FF] flex items-center justify-center shrink-0">
-                      <Building2 className="w-5 h-5" />
+            <div className="divide-y divide-slate-100 max-h-[460px] overflow-y-auto">
+              {filteredWithdrawals.map((wd) => {
+                const isPending = wd.status === 'processing';
+                return (
+                  <div
+                    key={wd.withdrawalId}
+                    className="px-6 py-4 min-h-[72px] flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-start gap-3.5 min-w-0">
+                      <div
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                          isPending
+                            ? 'bg-amber-50 text-amber-600'
+                            : 'bg-emerald-50 text-emerald-600'
+                        }`}
+                      >
+                        {isPending ? (
+                          <Clock className="w-5 h-5" />
+                        ) : (
+                          <Building2 className="w-5 h-5" />
+                        )}
+                      </div>
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="text-sm font-bold text-slate-900 truncate">
+                          {wd.destinationMasked}
+                        </p>
+                        <p className="text-xs text-slate-500 font-mono tabular-nums truncate">
+                          {wd.createdAt ? wd.createdAt.toDate().toLocaleDateString() : 'Just now'} ·{' '}
+                          <span
+                            className={
+                              isPending
+                                ? 'font-bold text-amber-700'
+                                : 'font-bold text-emerald-700 capitalize'
+                            }
+                          >
+                            {isPending ? 'Pending' : wd.status}
+                          </span>
+                        </p>
+                        {isPending && (
+                          <p className="text-xs font-semibold text-amber-700">
+                            Pending withdrawal will be sent within 24 hours
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold text-slate-900 truncate">
-                        {wd.destinationMasked}
-                      </p>
-                      <p className="text-xs text-slate-500 font-mono tabular-nums truncate">
-                        {wd.createdAt ? wd.createdAt.toDate().toLocaleDateString() : 'Just now'} ·{' '}
-                        <span className="capitalize">{wd.status}</span>
-                      </p>
+                    <div className="text-right shrink-0">
+                      <span className="text-sm font-extrabold font-mono tabular-nums text-slate-900 block">
+                        {formatUsdMicros(wd.amountMicros, 2)}
+                      </span>
+                      <span
+                        className={`text-[11px] font-bold ${
+                          isPending ? 'text-amber-700' : 'text-emerald-700'
+                        }`}
+                      >
+                        {isPending ? '24h Pending' : 'Sent'}
+                      </span>
                     </div>
                   </div>
-                  <span className="text-sm font-extrabold font-mono tabular-nums text-slate-900 shrink-0">
-                    {formatUsdMicros(wd.amountMicros, 2)}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>
